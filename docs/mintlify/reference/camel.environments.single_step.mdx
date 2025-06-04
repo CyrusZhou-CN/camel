@@ -49,6 +49,33 @@ Initialize the SingleStepEnv.
 - **timeout** (Optional[float], optional): The execution timeout in seconds. (default: :obj:`180.0`) **kwargs: Optional metadata or configuration values.
 - **Notes**: This class assumes all interactions are single-step: one question, one LLM response, one reward.
 
+<a id="camel.environments.single_step.SingleStepEnv.get_action_space"></a>
+
+### get_action_space
+
+```python
+def get_action_space(self):
+```
+
+**Returns:**
+
+  Any: The action space definition, which in this case is a string
+representing the LLM's response to the question.
+
+<a id="camel.environments.single_step.SingleStepEnv.get_observation_space"></a>
+
+### get_observation_space
+
+```python
+def get_observation_space(self):
+```
+
+**Returns:**
+
+  Any: The observation space definition, which in this case is a
+structured Observation containing a question,
+context, and metadata.
+
 <a id="camel.environments.single_step.SingleStepEnv._normalize_actions"></a>
 
 ### _normalize_actions

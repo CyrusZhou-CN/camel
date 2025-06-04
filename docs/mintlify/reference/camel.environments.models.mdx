@@ -61,3 +61,35 @@ def as_tuple(self):
 ```
 
 Returns all fields of the model as a tuple, in declaration order
+
+<a id="camel.environments.models.Environment"></a>
+
+## Environment
+
+```python
+class Environment(Protocol):
+```
+
+<a id="camel.environments.models.Environment.get_action_space"></a>
+
+### get_action_space
+
+```python
+def get_action_space(self):
+```
+
+**Returns:**
+
+  Any: The action space definition for the environment.
+
+<a id="camel.environments.models.Environment.get_observation_space"></a>
+
+### get_observation_space
+
+```python
+def get_observation_space(self):
+```
+
+**Returns:**
+
+  Any: The observation space definition for the environment.
