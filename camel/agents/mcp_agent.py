@@ -15,16 +15,25 @@
 import asyncio
 import json
 import platform
-import re
-from typing import Any, Callable, Dict, List, Optional, Union, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Union,
+    cast,
+)
 
-from camel.agents import ChatAgent
+from camel.agents.chat_agent import ChatAgent
 from camel.logger import get_logger
 from camel.messages import BaseMessage
-from camel.models import BaseModelBackend, ModelFactory
+from camel.models.base_model import BaseModelBackend
+from camel.models.model_factory import ModelFactory
 from camel.prompts import TextPrompt
 from camel.responses import ChatAgentResponse
-from camel.toolkits import FunctionTool, MCPToolkit
+from camel.toolkits.function_tool import FunctionTool
 from camel.types import (
     BaseMCPRegistryConfig,
     MCPRegistryType,
@@ -32,6 +41,9 @@ from camel.types import (
     ModelType,
     RoleType,
 )
+
+if TYPE_CHECKING:
+    from camel.toolkits.mcp_toolkit import MCPToolkit
 
 # AgentOps decorator setting
 try:
@@ -43,6 +55,8 @@ try:
         raise ImportError
 except (ImportError, AttributeError):
     from camel.utils import track_agent
+
+from camel.parsers.mcp_tool_call_parser import extract_tool_calls_from_text
 
 logger = get_logger(__name__)
 
@@ -125,7 +139,6 @@ class MCPAgent(ChatAgent):
         local_config_path: Optional[str] = None,
         tools: Optional[List[Union[FunctionTool, Callable]]] = None,
         function_calling_available: bool = True,
-        strict: bool = False,
         **kwargs,
     ):
         if model is None:
@@ -145,7 +158,6 @@ class MCPAgent(ChatAgent):
 
         self.local_config = local_config
         self.function_calling_available = function_calling_available
-        self.strict = strict
 
         if function_calling_available:
             sys_msg_content = "You are a helpful assistant, and you prefer "
@@ -170,8 +182,10 @@ class MCPAgent(ChatAgent):
             **kwargs,
         )
 
-    def _initialize_mcp_toolkit(self) -> MCPToolkit:
+    def _initialize_mcp_toolkit(self) -> "MCPToolkit":
         r"""Initialize the MCP toolkit from the provided configuration."""
+        from camel.toolkits.mcp_toolkit import MCPToolkit
+
         config_dict = {}
         for registry_config in self.registry_configs:
             config_dict.update(registry_config.get_config())
@@ -179,7 +193,7 @@ class MCPAgent(ChatAgent):
         if self.local_config:
             config_dict.update(self.local_config)
 
-        return MCPToolkit(config_dict=config_dict, strict=self.strict)
+        return MCPToolkit(config_dict=config_dict)
 
     def add_registry(self, registry_config: BaseMCPRegistryConfig) -> None:
         r"""Add a new registry configuration to the agent.
@@ -213,7 +227,6 @@ class MCPAgent(ChatAgent):
         ] = None,
         model: Optional[BaseModelBackend] = None,
         function_calling_available: bool = False,
-        strict: bool = False,
         **kwargs,
     ) -> "MCPAgent":
         r"""Create and connect an MCPAgent instance.
@@ -279,7 +292,6 @@ class MCPAgent(ChatAgent):
             registry_configs=final_registry_configs,
             model=model,
             function_calling_available=function_calling_available,
-            strict=strict,
             **kwargs,
         )
 
@@ -338,27 +350,14 @@ class MCPAgent(ChatAgent):
             task = f"## Task:\n  {input_message}"
             input_message = str(self._text_tools) + task
             response = await super().astep(input_message, *args, **kwargs)
-            content = response.msgs[0].content.lower()
+            raw_content = response.msgs[0].content if response.msgs else ""
+            content = (
+                raw_content
+                if isinstance(raw_content, str)
+                else str(raw_content)
+            )
 
-            tool_calls = []
-            while "```json" in content:
-                json_match = re.search(r'```json', content)
-                if not json_match:
-                    break
-                json_start = json_match.span()[1]
-
-                end_match = re.search(r'```', content[json_start:])
-                if not end_match:
-                    break
-                json_end = end_match.span()[0] + json_start
-
-                tool_json = content[json_start:json_end].strip('\n')
-                try:
-                    tool_calls.append(json.loads(tool_json))
-                except json.JSONDecodeError:
-                    logger.warning(f"Failed to parse JSON: {tool_json}")
-                    continue
-                content = content[json_end:]
+            tool_calls = extract_tool_calls_from_text(content)
 
             if not tool_calls:
                 return response

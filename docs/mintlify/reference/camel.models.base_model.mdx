@@ -48,6 +48,7 @@ It may be OpenAI API, a local LLM, a stub for unit tests, etc.
 - **url** (Optional[str], optional): The url to the model service. (default: :obj:`None`)
 - **token_counter** (Optional[BaseTokenCounter], optional): Token counter to use for the model. If not provided, :obj:`OpenAITokenCounter` will be used. (default: :obj:`None`)
 - **timeout** (Optional[float], optional): The timeout value in seconds for API calls. (default: :obj:`None`)
+- **max_retries** (int, optional): Maximum number of retries for API calls. (default: :obj:`3`)
 
 <a id="camel.models.base_model.BaseModelBackend.__init__"></a>
 
@@ -61,7 +62,8 @@ def __init__(
     api_key: Optional[str] = None,
     url: Optional[str] = None,
     token_counter: Optional[BaseTokenCounter] = None,
-    timeout: Optional[float] = None
+    timeout: Optional[float] = Constants.TIMEOUT_THRESHOLD,
+    max_retries: int = 3
 ):
 ```
 
@@ -99,6 +101,40 @@ detected.
 
   List[OpenAIMessage]: Preprocessed messages
 
+<a id="camel.models.base_model.BaseModelBackend._log_request"></a>
+
+### _log_request
+
+```python
+def _log_request(self, messages: List[OpenAIMessage]):
+```
+
+Log the request messages to a JSON file if logging is enabled.
+
+**Parameters:**
+
+- **messages** (List[OpenAIMessage]): The messages to log.
+
+**Returns:**
+
+  Optional[str]: The path to the log file if logging is enabled,
+None otherwise.
+
+<a id="camel.models.base_model.BaseModelBackend._log_response"></a>
+
+### _log_response
+
+```python
+def _log_response(self, log_path: str, response: Any):
+```
+
+Log the response to the existing log file.
+
+**Parameters:**
+
+- **log_path** (str): The path to the log file.
+- **response** (Any): The response to log.
+
 <a id="camel.models.base_model.BaseModelBackend._run"></a>
 
 ### _run
@@ -111,6 +147,22 @@ def _run(
     tools: Optional[List[Dict[str, Any]]] = None
 ):
 ```
+
+Runs the query to the backend model in a non-stream mode.
+
+**Parameters:**
+
+- **messages** (List[OpenAIMessage]): Message list with the chat history in OpenAI API format.
+- **response_format** (Optional[Type[BaseModel]]): The format of the response.
+- **tools** (Optional[List[Dict[str, Any]]]): The schema of the tools to use for the request.
+
+**Returns:**
+
+  Union[ChatCompletion, Stream[ChatCompletionChunk], Any]:
+`ChatCompletion` in the non-stream mode, or
+`Stream[ChatCompletionChunk]` in the stream mode,
+or `ChatCompletionStreamManager[BaseModel]` in the structured
+stream mode.
 
 <a id="camel.models.base_model.BaseModelBackend.run"></a>
 
@@ -135,17 +187,11 @@ Runs the query to the backend model.
 
 **Returns:**
 
-  Union[ChatCompletion, Stream[ChatCompletionChunk]]:
-`ChatCompletion` in the non-stream mode, or
-`Stream[ChatCompletionChunk]` in the stream mode.
-
-<a id="camel.models.base_model.BaseModelBackend.check_model_config"></a>
-
-### check_model_config
-
-```python
-def check_model_config(self):
-```
+  Union[ChatCompletion, Stream[ChatCompletionChunk], Any]:
+`ChatCompletion` in the non-stream mode,
+`Stream[ChatCompletionChunk]` in the stream mode, or
+`ChatCompletionStreamManager[BaseModel]` in the structured
+stream mode.
 
 <a id="camel.models.base_model.BaseModelBackend.count_tokens_from_messages"></a>
 

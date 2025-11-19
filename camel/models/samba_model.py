@@ -22,8 +22,6 @@ from openai import AsyncOpenAI, AsyncStream, OpenAI, Stream
 from pydantic import BaseModel
 
 from camel.configs import (
-    SAMBA_CLOUD_API_PARAMS,
-    SAMBA_VERSE_API_PARAMS,
     SambaCloudAPIConfig,
 )
 from camel.messages import OpenAIMessage
@@ -88,6 +86,18 @@ class SambaModel(BaseModelBackend):
             API calls. If not provided, will fall back to the MODEL_TIMEOUT
             environment variable or default to 180 seconds.
             (default: :obj:`None`)
+        max_retries (int, optional): Maximum number of retries for API calls.
+            (default: :obj:`3`)
+        client (Optional[Any], optional): A custom synchronous
+            OpenAI-compatible client instance. If provided, this client will
+            be used instead of creating a new one. Only applicable when using
+            SambaNova Cloud API. (default: :obj:`None`)
+        async_client (Optional[Any], optional): A custom asynchronous
+            OpenAI-compatible client instance. If provided, this client will
+            be used instead of creating a new one. Only applicable when using
+            SambaNova Cloud API. (default: :obj:`None`)
+        **kwargs (Any): Additional arguments to pass to the client
+            initialization. Ignored if custom clients are provided.
     """
 
     @api_keys_required(
@@ -103,6 +113,10 @@ class SambaModel(BaseModelBackend):
         url: Optional[str] = None,
         token_counter: Optional[BaseTokenCounter] = None,
         timeout: Optional[float] = None,
+        max_retries: int = 3,
+        client: Optional[Any] = None,
+        async_client: Optional[Any] = None,
+        **kwargs: Any,
     ) -> None:
         if model_config_dict is None:
             model_config_dict = SambaCloudAPIConfig().as_dict()
@@ -113,22 +127,39 @@ class SambaModel(BaseModelBackend):
         )
         timeout = timeout or float(os.environ.get("MODEL_TIMEOUT", 180))
         super().__init__(
-            model_type, model_config_dict, api_key, url, token_counter, timeout
+            model_type,
+            model_config_dict,
+            api_key,
+            url,
+            token_counter,
+            timeout,
+            max_retries,
         )
 
+        # Only create clients for Cloud API mode
         if self._url == "https://api.sambanova.ai/v1":
-            self._client = OpenAI(
-                timeout=self._timeout,
-                max_retries=3,
-                base_url=self._url,
-                api_key=self._api_key,
-            )
-            self._async_client = AsyncOpenAI(
-                timeout=self._timeout,
-                max_retries=3,
-                base_url=self._url,
-                api_key=self._api_key,
-            )
+            # Use custom clients if provided, otherwise create new ones
+            if client is not None:
+                self._client = client
+            else:
+                self._client = OpenAI(
+                    timeout=self._timeout,
+                    max_retries=self._max_retries,
+                    base_url=self._url,
+                    api_key=self._api_key,
+                    **kwargs,
+                )
+
+            if async_client is not None:
+                self._async_client = async_client
+            else:
+                self._async_client = AsyncOpenAI(
+                    timeout=self._timeout,
+                    max_retries=self._max_retries,
+                    base_url=self._url,
+                    api_key=self._api_key,
+                    **kwargs,
+                )
 
     @property
     def token_counter(self) -> BaseTokenCounter:
@@ -141,36 +172,6 @@ class SambaModel(BaseModelBackend):
         if not self._token_counter:
             self._token_counter = OpenAITokenCounter(ModelType.GPT_4O_MINI)
         return self._token_counter
-
-    def check_model_config(self):
-        r"""Check whether the model configuration contains any
-        unexpected arguments to SambaNova API.
-
-        Raises:
-            ValueError: If the model configuration dictionary contains any
-                unexpected arguments to SambaNova API.
-        """
-        if self._url == "https://sambaverse.sambanova.ai/api/predict":
-            for param in self.model_config_dict:
-                if param not in SAMBA_VERSE_API_PARAMS:
-                    raise ValueError(
-                        f"Unexpected argument `{param}` is "
-                        "input into SambaVerse API."
-                    )
-
-        elif self._url == "https://api.sambanova.ai/v1":
-            for param in self.model_config_dict:
-                if param not in SAMBA_CLOUD_API_PARAMS:
-                    raise ValueError(
-                        f"Unexpected argument `{param}` is "
-                        "input into SambaCloud API."
-                    )
-
-        else:
-            raise ValueError(
-                f"{self._url} is not supported, please check the url to the"
-                " SambaNova service"
-            )
 
     @observe(as_type="generation")
     async def _arun(  # type: ignore[misc]

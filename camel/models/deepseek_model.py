@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Type, Union
 from openai import AsyncStream, Stream
 from pydantic import BaseModel
 
-from camel.configs import DEEPSEEK_API_PARAMS, DeepSeekConfig
+from camel.configs import DeepSeekConfig
 from camel.logger import get_logger
 from camel.messages import OpenAIMessage
 from camel.models._utils import try_modify_message_with_format
@@ -38,6 +38,11 @@ from camel.utils import (
 if os.environ.get("LANGFUSE_ENABLED", "False").lower() == "true":
     try:
         from langfuse.decorators import observe
+    except ImportError:
+        from camel.utils import observe
+elif os.environ.get("TRACEROOT_ENABLED", "False").lower() == "true":
+    try:
+        from traceroot import trace as observe  # type: ignore[import]
     except ImportError:
         from camel.utils import observe
 else:
@@ -78,6 +83,10 @@ class DeepSeekModel(OpenAICompatibleModel):
             API calls. If not provided, will fall back to the MODEL_TIMEOUT
             environment variable or default to 180 seconds.
             (default: :obj:`None`)
+        max_retries (int, optional): Maximum number of retries for API calls.
+            (default: :obj:`3`)
+        **kwargs (Any): Additional arguments to pass to the client
+            initialization.
 
     References:
         https://api-docs.deepseek.com/
@@ -96,6 +105,8 @@ class DeepSeekModel(OpenAICompatibleModel):
         url: Optional[str] = None,
         token_counter: Optional[BaseTokenCounter] = None,
         timeout: Optional[float] = None,
+        max_retries: int = 3,
+        **kwargs: Any,
     ) -> None:
         if model_config_dict is None:
             model_config_dict = DeepSeekConfig().as_dict()
@@ -112,6 +123,8 @@ class DeepSeekModel(OpenAICompatibleModel):
             url=url,
             token_counter=token_counter,
             timeout=timeout,
+            max_retries=max_retries,
+            **kwargs,
         )
 
     def _prepare_request(
@@ -274,18 +287,3 @@ class DeepSeekModel(OpenAICompatibleModel):
         )
 
         return self._post_handle_response(response)
-
-    def check_model_config(self):
-        r"""Check whether the model configuration contains any
-        unexpected arguments to DeepSeek API.
-
-        Raises:
-            ValueError: If the model configuration dictionary contains any
-                unexpected arguments to DeepSeek API.
-        """
-        for param in self.model_config_dict:
-            if param not in DEEPSEEK_API_PARAMS:
-                raise ValueError(
-                    f"Unexpected argument `{param}` is "
-                    "input into DeepSeek model backend."
-                )

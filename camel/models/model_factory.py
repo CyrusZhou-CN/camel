@@ -13,14 +13,17 @@
 # ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
 import json
 import os
-from typing import ClassVar, Dict, Optional, Type, Union
+from typing import Any, ClassVar, Dict, Optional, Type, Union
 
+from camel.models.aihubmix_model import AihubMixModel
 from camel.models.aiml_model import AIMLModel
+from camel.models.amd_model import AMDModel
 from camel.models.anthropic_model import AnthropicModel
 from camel.models.aws_bedrock_model import AWSBedrockModel
 from camel.models.azure_openai_model import AzureOpenAIModel
 from camel.models.base_model import BaseModelBackend
 from camel.models.cohere_model import CohereModel
+from camel.models.cometapi_model import CometAPIModel
 from camel.models.crynux_model import CrynuxModel
 from camel.models.deepseek_model import DeepSeekModel
 from camel.models.gemini_model import GeminiModel
@@ -28,9 +31,11 @@ from camel.models.groq_model import GroqModel
 from camel.models.internlm_model import InternLMModel
 from camel.models.litellm_model import LiteLLMModel
 from camel.models.lmstudio_model import LMStudioModel
+from camel.models.minimax_model import MinimaxModel
 from camel.models.mistral_model import MistralModel
 from camel.models.modelscope_model import ModelScopeModel
 from camel.models.moonshot_model import MoonshotModel
+from camel.models.nebius_model import NebiusModel
 from camel.models.netmind_model import NetmindModel
 from camel.models.novita_model import NovitaModel
 from camel.models.nvidia_model import NvidiaModel
@@ -39,6 +44,7 @@ from camel.models.openai_compatible_model import OpenAICompatibleModel
 from camel.models.openai_model import OpenAIModel
 from camel.models.openrouter_model import OpenRouterModel
 from camel.models.ppio_model import PPIOModel
+from camel.models.qianfan_model import QianfanModel
 from camel.models.qwen_model import QwenModel
 from camel.models.reka_model import RekaModel
 from camel.models.samba_model import SambaModel
@@ -75,6 +81,7 @@ class ModelFactory:
         ModelPlatformType.AWS_BEDROCK: AWSBedrockModel,
         ModelPlatformType.NVIDIA: NvidiaModel,
         ModelPlatformType.SILICONFLOW: SiliconFlowModel,
+        ModelPlatformType.AMD: AMDModel,
         ModelPlatformType.AIML: AIMLModel,
         ModelPlatformType.VOLCANO: VolcanoModel,
         ModelPlatformType.NETMIND: NetmindModel,
@@ -82,7 +89,10 @@ class ModelFactory:
         ModelPlatformType.AZURE: AzureOpenAIModel,
         ModelPlatformType.ANTHROPIC: AnthropicModel,
         ModelPlatformType.GROQ: GroqModel,
+        ModelPlatformType.COMETAPI: CometAPIModel,
+        ModelPlatformType.NEBIUS: NebiusModel,
         ModelPlatformType.LMSTUDIO: LMStudioModel,
+        ModelPlatformType.MINIMAX: MinimaxModel,
         ModelPlatformType.OPENROUTER: OpenRouterModel,
         ModelPlatformType.ZHIPU: ZhipuAIModel,
         ModelPlatformType.GEMINI: GeminiModel,
@@ -98,7 +108,9 @@ class ModelFactory:
         ModelPlatformType.MODELSCOPE: ModelScopeModel,
         ModelPlatformType.NOVITA: NovitaModel,
         ModelPlatformType.WATSONX: WatsonXModel,
+        ModelPlatformType.QIANFAN: QianfanModel,
         ModelPlatformType.CRYNUX: CrynuxModel,
+        ModelPlatformType.AIHUBMIX: AihubMixModel,
     }
 
     @staticmethod
@@ -110,6 +122,9 @@ class ModelFactory:
         api_key: Optional[str] = None,
         url: Optional[str] = None,
         timeout: Optional[float] = None,
+        max_retries: int = 3,
+        client: Optional[Any] = None,
+        async_client: Optional[Any] = None,
         **kwargs,
     ) -> BaseModelBackend:
         r"""Creates an instance of `BaseModelBackend` of the specified type.
@@ -134,6 +149,16 @@ class ModelFactory:
                 (default: :obj:`None`)
             timeout (Optional[float], optional): The timeout value in seconds
                 for API calls. (default: :obj:`None`)
+            max_retries (int, optional): Maximum number of retries
+                for API calls. (default: :obj:`3`)
+            client (Optional[Any], optional): A custom synchronous client
+                instance. Supported by models that use OpenAI-compatible APIs
+                . The client should implement the appropriate client interface
+                for the platform. (default: :obj:`None`)
+            async_client (Optional[Any], optional): A custom asynchronous
+                client instance. Supported by models that use OpenAI-compatible
+                APIs. The client should implement the appropriate async client
+                interface for the platform. (default: :obj:`None`)
             **kwargs: Additional model-specific parameters that will be passed
                 to the model constructor. For example, Azure OpenAI models may
                 require `api_version`, `azure_deployment_name`,
@@ -179,6 +204,12 @@ class ModelFactory:
         if model_class is None:
             raise ValueError(f"Unknown model platform `{model_platform}`")
 
+        # Pass client and async_client via kwargs if provided
+        if client is not None:
+            kwargs['client'] = client
+        if async_client is not None:
+            kwargs['async_client'] = async_client
+
         return model_class(
             model_type=model_type,
             model_config_dict=model_config_dict,
@@ -186,6 +217,7 @@ class ModelFactory:
             url=url,
             token_counter=token_counter,
             timeout=timeout,
+            max_retries=max_retries,
             **kwargs,
         )
 
