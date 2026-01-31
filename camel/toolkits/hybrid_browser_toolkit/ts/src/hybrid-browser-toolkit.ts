@@ -1,5 +1,5 @@
 import {HybridBrowserSession} from './browser-session';
-import {ActionResult, BrowserAction, BrowserToolkitConfig, SnapshotResult, TabInfo, VisualMarkResult} from './types';
+import {ActionResult, BrowserAction, BrowserToolkitConfig, PageStabilityResult, SnapshotResult, TabInfo, VisualMarkResult} from './types';
 import {ConfigLoader} from './config-loader';
 import {ConsoleMessage} from 'playwright';
 import {SomScreenshotInjected} from './som-screenshot-injected';
@@ -22,10 +22,10 @@ export class HybridBrowserToolkit {
 
   async openBrowser(startUrl?: string): Promise<ActionResult> {
     const startTime = Date.now();
-    
+
     try {
       await this.session.ensureBrowser();
-      
+
       // Check if we should skip navigation in CDP keep-current-page mode
       const browserConfig = this.configLoader.getBrowserConfig();
       if (browserConfig.cdpUrl && browserConfig.cdpKeepCurrentPage && !startUrl) {
@@ -33,12 +33,12 @@ export class HybridBrowserToolkit {
         const snapshotStart = Date.now();
         const snapshot = await this.getSnapshotForAction(this.viewportLimit);
         const snapshotTime = Date.now() - snapshotStart;
-        
+
         const page = await this.session.getCurrentPage();
         const currentUrl = page ? await page.url() : 'unknown';
-        
+
         const totalTime = Date.now() - startTime;
-        
+
         return {
           success: true,
           message: `Browser opened in CDP keep-current-page mode (current page: ${currentUrl})`,
@@ -49,18 +49,18 @@ export class HybridBrowserToolkit {
           },
         };
       }
-      
+
       // For normal mode or CDP with cdpKeepCurrentPage=false: navigate to URL
       if (!browserConfig.cdpUrl || !browserConfig.cdpKeepCurrentPage) {
         const url = startUrl || this.config.defaultStartUrl || 'https://google.com/';
         const result = await this.session.visitPage(url);
-        
+
         const snapshotStart = Date.now();
         const snapshot = await this.getSnapshotForAction(this.viewportLimit);
         const snapshotTime = Date.now() - snapshotStart;
-        
+
         const totalTime = Date.now() - startTime;
-        
+
         return {
           success: true,
           message: result.message,
@@ -72,14 +72,14 @@ export class HybridBrowserToolkit {
           },
         };
       }
-      
+
       // Fallback: Just return current page snapshot without any navigation
       const snapshotStart = Date.now();
       const snapshot = await this.getSnapshotForAction(this.viewportLimit);
       const snapshotTime = Date.now() - snapshotStart;
-      
+
       const totalTime = Date.now() - startTime;
-      
+
       return {
         success: true,
         message: `Browser opened without navigation`,
@@ -120,35 +120,35 @@ export class HybridBrowserToolkit {
     try {
       // Ensure browser is initialized before visiting page
       await this.session.ensureBrowser();
-      
+
       const result = await this.session.visitPage(url);
-      
+
       // Format response for Python layer compatibility
       const response: any = {
         result: result.message,
         snapshot: '',
       };
-      
+
       if (result.success) {
         const snapshotStart = Date.now();
         response.snapshot = await this.getSnapshotForAction(this.viewportLimit);
         const snapshotTime = Date.now() - snapshotStart;
-        
+
         if (result.timing) {
           result.timing.snapshot_time_ms = snapshotTime;
         }
       }
-      
+
       // Include timing if available
       if (result.timing) {
         response.timing = result.timing;
       }
-      
+
       // Include newTabId if present
       if (result.newTabId) {
         response.newTabId = result.newTabId;
       }
-      
+
       return response;
     } catch (error) {
       console.error('[visitPage] Error:', error);
@@ -175,7 +175,7 @@ export class HybridBrowserToolkit {
       return `Error capturing snapshot: ${error}`;
     }
   }
-  
+
   // Internal method for getting snapshot in actions (respects fullVisualMode)
   private async getSnapshotForAction(viewportLimit: boolean = false): Promise<string> {
     if (this.fullVisualMode) {
@@ -192,16 +192,16 @@ export class HybridBrowserToolkit {
   async getSomScreenshot(): Promise<VisualMarkResult & { timing: any }> {
     const startTime = Date.now();
     console.log('[HybridBrowserToolkit] Starting getSomScreenshot...');
-    
+
     try {
       // Get page and snapshot data
       const page = await this.session.getCurrentPage();
       const snapshotResult = await this.session.getSnapshotForAI(true); // Include coordinates
-      
+
       // Parse clickable elements from snapshot text
       const clickableElements = this.parseClickableElements(snapshotResult.snapshot);
       console.log(`[HybridBrowserToolkit] Found ${clickableElements.size} clickable elements`);
-      
+
       // Apply hierarchy-based filtering
       const filteredElements = filterClickableByHierarchy(snapshotResult.snapshot, clickableElements);
       console.log(`[HybridBrowserToolkit] After filtering: ${filteredElements.size} elements remain`);
@@ -213,11 +213,11 @@ export class HybridBrowserToolkit {
         filteredElements,
         undefined  // No export path - don't generate files
       );
-      
+
       // Add snapshot timing info to result
       result.timing.snapshot_time_ms = snapshotResult.timing.snapshot_time_ms;
       result.timing.coordinate_enrichment_time_ms = snapshotResult.timing.coordinate_enrichment_time_ms;
-      
+
       return result;
     } catch (error) {
       const totalTime = Date.now() - startTime;
@@ -242,7 +242,7 @@ export class HybridBrowserToolkit {
   private parseClickableElements(snapshotText: string): Set<string> {
     const clickableElements = new Set<string>();
     const lines = snapshotText.split('\n');
-    
+
     for (const line of lines) {
       // Look for lines containing [cursor=pointer] or [active] and extract ref
       if (line.includes('[cursor=pointer]') || line.includes('[active]')) {
@@ -252,23 +252,23 @@ export class HybridBrowserToolkit {
         }
       }
     }
-    
+
     return clickableElements;
   }
 
 
   private async executeActionWithSnapshot(action: BrowserAction): Promise<any> {
     const result = await this.session.executeAction(action);
-    
+
     const response: any = {
       result: result.message,
       snapshot: '',
     };
-    
+
     if (result.success) {
       if (result.details?.diffSnapshot) {
         response.snapshot = result.details.diffSnapshot;
-        
+
         if (result.timing) {
           result.timing.snapshot_time_ms = 0; // Diff snapshot time is included in action time
         }
@@ -277,23 +277,23 @@ export class HybridBrowserToolkit {
         const snapshotStart = Date.now();
         response.snapshot = await this.getPageSnapshot(this.viewportLimit);
         const snapshotTime = Date.now() - snapshotStart;
-        
+
         if (result.timing) {
           result.timing.snapshot_time_ms = snapshotTime;
         }
       }
     }
-    
+
     // Include timing if available
     if (result.timing) {
       response.timing = result.timing;
     }
-    
+
     // Include newTabId if present
     if (result.newTabId) {
       response.newTabId = result.newTabId;
     }
-    
+
     // Include details if present (excluding diffSnapshot as it's already in snapshot)
     if (result.details) {
       const { diffSnapshot, ...otherDetails } = result.details;
@@ -301,7 +301,12 @@ export class HybridBrowserToolkit {
         response.details = otherDetails;
       }
     }
-    
+
+    // Include note if present
+    if (result.note) {
+      response.note = result.note;
+    }
+
     return response;
   }
 
@@ -312,7 +317,7 @@ export class HybridBrowserToolkit {
 
   async type(refOrInputs: string | Array<{ ref: string; text: string }>, text?: string): Promise<any> {
     let action: BrowserAction;
-    
+
     if (typeof refOrInputs === 'string') {
       // Single input mode (backward compatibility)
       if (text === undefined) {
@@ -323,7 +328,7 @@ export class HybridBrowserToolkit {
       // Multiple inputs mode
       action = { type: 'type', inputs: refOrInputs };
     }
-    
+
     return this.executeActionWithSnapshot(action);
   }
 
@@ -363,20 +368,23 @@ export class HybridBrowserToolkit {
 
   async back(): Promise<ActionResult> {
     const startTime = Date.now();
-    
+
     try {
       const page = await this.session.getCurrentPage();
-      
+
       const navigationStart = Date.now();
       await page.goBack({ waitUntil: 'domcontentloaded' });
       const navigationTime = Date.now() - navigationStart;
-      
+
+      // Wait for page stability after navigation
+      const stabilityResult = await this.session.waitForPageStability(page);
+
       const snapshotStart = Date.now();
       const snapshot = await this.getSnapshotForAction(this.viewportLimit);
       const snapshotTime = Date.now() - snapshotStart;
-      
+
       const totalTime = Date.now() - startTime;
-      
+
       return {
         success: true,
         message: 'Navigated back successfully',
@@ -384,8 +392,12 @@ export class HybridBrowserToolkit {
         timing: {
           total_time_ms: totalTime,
           navigation_time_ms: navigationTime,
+          dom_content_loaded_time_ms: stabilityResult.domContentLoadedTime,
+          network_idle_time_ms: stabilityResult.networkIdleTime,
+          dom_stability_time_ms: stabilityResult.domStabilityTime,
           snapshot_time_ms: snapshotTime,
         },
+        note: stabilityResult.note,
       };
     } catch (error) {
       const totalTime = Date.now() - startTime;
@@ -403,20 +415,23 @@ export class HybridBrowserToolkit {
 
   async forward(): Promise<ActionResult> {
     const startTime = Date.now();
-    
+
     try {
       const page = await this.session.getCurrentPage();
-      
+
       const navigationStart = Date.now();
       await page.goForward({ waitUntil: 'domcontentloaded' });
       const navigationTime = Date.now() - navigationStart;
-      
+
+      // Wait for page stability after navigation
+      const stabilityResult = await this.session.waitForPageStability(page);
+
       const snapshotStart = Date.now();
       const snapshot = await this.getSnapshotForAction(this.viewportLimit);
       const snapshotTime = Date.now() - snapshotStart;
-      
+
       const totalTime = Date.now() - startTime;
-      
+
       return {
         success: true,
         message: 'Navigated forward successfully',
@@ -424,8 +439,12 @@ export class HybridBrowserToolkit {
         timing: {
           total_time_ms: totalTime,
           navigation_time_ms: navigationTime,
+          dom_content_loaded_time_ms: stabilityResult.domContentLoadedTime,
+          network_idle_time_ms: stabilityResult.networkIdleTime,
+          dom_stability_time_ms: stabilityResult.domStabilityTime,
           snapshot_time_ms: snapshotTime,
         },
+        note: stabilityResult.note,
       };
     } catch (error) {
       const totalTime = Date.now() - startTime;
@@ -444,24 +463,33 @@ export class HybridBrowserToolkit {
 
   async switchTab(tabId: string): Promise<any> {
     const startTime = Date.now();
-    
+
     try {
       const success = await this.session.switchToTab(tabId);
-      
+
       if (success) {
+        const page = await this.session.getCurrentPage();
+
+        // Wait for page stability after tab switch
+        const stabilityResult = await this.session.waitForPageStability(page);
+
         const snapshotStart = Date.now();
         const snapshot = await this.getPageSnapshot(this.viewportLimit);
         const snapshotTime = Date.now() - snapshotStart;
-        
+
         const totalTime = Date.now() - startTime;
-        
+
         return {
           result: `Switched to tab ${tabId}`,
           snapshot: snapshot,
           timing: {
             total_time_ms: totalTime,
+            dom_content_loaded_time_ms: stabilityResult.domContentLoadedTime,
+            network_idle_time_ms: stabilityResult.networkIdleTime,
+            dom_stability_time_ms: stabilityResult.domStabilityTime,
             snapshot_time_ms: snapshotTime,
           },
+          note: stabilityResult.note,
         };
       } else {
         return {
@@ -479,7 +507,7 @@ export class HybridBrowserToolkit {
 
   async closeTab(tabId: string): Promise<ActionResult> {
     const success = await this.session.closeTab(tabId);
-    
+
     if (success) {
       return {
         success: true,
@@ -511,7 +539,7 @@ export class HybridBrowserToolkit {
     const startTime = Date.now();
     try {
       const page = await this.session.getCurrentPage();
-      
+
       // Wrap the code to capture console.log output
       const wrappedCode = `
         (function() {
@@ -527,7 +555,7 @@ export class HybridBrowserToolkit {
             }).join(' '));
             originalLog.apply(console, args);
           };
-          
+
           let result;
           try {
             result = eval(${JSON.stringify(code)});
@@ -539,12 +567,12 @@ export class HybridBrowserToolkit {
               throw error;
             }
           }
-          
+
           console.log = originalLog;
           return { result, logs: _logs };
         })()
       `;
-      
+
       const evalResult = await page.evaluate(wrappedCode) as { result: any; logs: string[] };
       const { result, logs } = evalResult;
 
@@ -571,7 +599,7 @@ export class HybridBrowserToolkit {
           snapshot_time_ms: snapshotTime,
         },
       };
-      
+
     } catch (error) {
       const totalTime = Date.now() - startTime;
       return {
@@ -587,4 +615,3 @@ export class HybridBrowserToolkit {
   }
 
 }
-

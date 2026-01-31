@@ -1,6 +1,26 @@
 import { Page, Browser, BrowserContext, chromium, ConsoleMessage, Frame } from 'playwright';
-import { BrowserToolkitConfig, SnapshotResult, SnapshotElement, ActionResult, TabInfo, BrowserAction, DetailedTiming } from './types';
+import { BrowserToolkitConfig, SnapshotResult, SnapshotElement, ActionResult, TabInfo, BrowserAction, DetailedTiming, PageStabilityResult } from './types';
 import { ConfigLoader, StealthConfig } from './config-loader';
+
+// Constants for loading element detection
+// Using word boundary patterns to avoid false positives like "unloading" or "windspinner"
+const LOADING_CLASS_PATTERNS = [
+  /\bloading\b/i,    // matches "loading", "is-loading", "loading-spinner" but not "unloading"
+  /\bloader\b/i,     // matches "loader", "page-loader" but not "preloader" (intentionally excluded)
+  /\bspinner\b/i,    // matches "spinner", "loading-spinner" but not "windspinner"
+  /\bspin\b/i,       // matches "spin", "spin-animation"
+];
+
+// CSS selector for querying loading elements - matches common loading class patterns
+const LOADING_ELEMENTS_SELECTOR = [
+  '[class*="loading"]:not([class*="unloading"]):not([class*="loaded"])',
+  '[class*="loader"]',
+  '[class*="spinner"]',
+  '[class*="spin"]:not([class*="spinach"])', // avoid false positives
+].join(', ');
+
+// Note message for loading state warning
+const LOADING_STATE_NOTE = 'Loading-related elements were detected on this page. The page may still be in a loading or transitional state. The current snapshot may not reflect the final state.';
 
 export class HybridBrowserSession {
   private browser: Browser | null = null;
@@ -13,13 +33,24 @@ export class HybridBrowserSession {
   private configLoader: ConfigLoader;
   private scrollPosition: { x: number; y: number } = {x: 0, y: 0};
   private hasNavigatedBefore = false; //  Track if we've navigated before
-  private logLimit: number; 
+  private logLimit: number;
 
   constructor(config: BrowserToolkitConfig = {}) {
     // Use ConfigLoader's fromPythonConfig to handle conversion properly
     this.configLoader = ConfigLoader.fromPythonConfig(config);
     // Load browser configuration for console log limit, default to 1000
     this.logLimit = this.configLoader.getBrowserConfig().consoleLogLimit || 1000;
+  }
+
+  /**
+   * Compatibility wrapper for _snapshotForAI() API
+   * Handles both old (string return) and new (object with .full) versions
+   */
+  private async getSnapshot(page: Page): Promise<string> {
+    const result = await (page as any)._snapshotForAI();
+    // Version compatibility: if result is object (v1.57.0+), use .full property
+    // If result is string (v1.56.x and earlier), return directly
+    return typeof result === 'string' ? result : result.full;
   }
 
   private registerNewPage(tabId: string, page: Page): void {
@@ -43,25 +74,25 @@ export class HybridBrowserSession {
     });
   }
 
-  async ensureBrowser(): Promise<void> {  
+  async ensureBrowser(): Promise<void> {
     if (this.browser) {
       return;
     }
 
     const browserConfig = this.configLoader.getBrowserConfig();
     const stealthConfig = this.configLoader.getStealthConfig();
-    
+
     // Check if CDP URL is provided
     if (browserConfig.cdpUrl) {
       // Connect to existing browser via CDP
       this.browser = await chromium.connectOverCDP(browserConfig.cdpUrl);
-      
+
       // Get existing contexts or create new one
       const contexts = this.browser.contexts();
       if (contexts.length > 0) {
         this.context = contexts[0];
         this.contextOwnedByUs = false;
-        
+
         // Apply stealth headers to existing context if configured
         // Note: userAgent cannot be changed on an existing context
         if (stealthConfig.enabled) {
@@ -76,7 +107,7 @@ export class HybridBrowserSession {
         const contextOptions: any = {
           viewport: browserConfig.viewport
         };
-        
+
         // Apply stealth headers and UA if configured
         if (stealthConfig.enabled) {
           if (stealthConfig.extraHTTPHeaders) {
@@ -86,12 +117,12 @@ export class HybridBrowserSession {
             contextOptions.userAgent = stealthConfig.userAgent;
           }
         }
-        
+
         this.context = await this.browser.newContext(contextOptions);
         this.contextOwnedByUs = true;
         this.browser = this.context.browser();
       }
-      
+
       const pages = this.context.pages();
       console.log(`[CDP] cdpKeepCurrentPage: ${browserConfig.cdpKeepCurrentPage}, pages count: ${pages.length}`);
       if (browserConfig.cdpKeepCurrentPage) {
@@ -105,7 +136,7 @@ export class HybridBrowserSession {
               break;
             }
           }
-          
+
           if (validPage) {
             const tabId = this.generateTabId();
             this.registerNewPage(tabId, validPage);
@@ -133,7 +164,7 @@ export class HybridBrowserSession {
               break;
             }
           }
-          
+
           if (!availablePageFound) {
             console.log('[CDP] No blank pages found, creating new page');
             const newPage = await this.context.newPage();
@@ -157,7 +188,7 @@ export class HybridBrowserSession {
 
       if (stealthConfig.enabled) {
         launchOptions.args = stealthConfig.args || [];
-        
+
         // Apply stealth user agent/headers if configured
         if (stealthConfig.userAgent) {
           launchOptions.userAgent = stealthConfig.userAgent;
@@ -187,7 +218,7 @@ export class HybridBrowserSession {
         const contextOptions: any = {
           viewport: browserConfig.viewport
         };
-        
+
         // Apply stealth headers and UA if configured
         if (stealthConfig.enabled) {
           if (stealthConfig.extraHTTPHeaders) {
@@ -197,10 +228,10 @@ export class HybridBrowserSession {
             contextOptions.userAgent = stealthConfig.userAgent;
           }
         }
-        
+
         this.context = await this.browser.newContext(contextOptions);
         this.contextOwnedByUs = true;
-        
+
         const initialPage = await this.context.newPage();
         const initialTabId = this.generateTabId();
         this.registerNewPage(initialTabId, initialPage);
@@ -225,7 +256,7 @@ export class HybridBrowserSession {
     const browserConfig = this.configLoader.getBrowserConfig();
     return (
       // Standard about:blank variations (prefix match for query params)
-      url === 'about:blank' || 
+      url === 'about:blank' ||
       url.startsWith('about:blank?') ||
       // Configured blank page URLs (exact match for compatibility)
       browserConfig.blankPageUrls.includes(url) ||
@@ -239,12 +270,12 @@ export class HybridBrowserSession {
   async getCurrentPage(): Promise<Page> {
     if (!this.currentTabId || !this.pages.has(this.currentTabId)) {
       const browserConfig = this.configLoader.getBrowserConfig();
-      
+
       // In CDP keep-current-page mode, find existing page
       if (browserConfig.cdpKeepCurrentPage && browserConfig.cdpUrl && this.context) {
         const allPages = this.context.pages();
         console.log(`[getCurrentPage] cdpKeepCurrentPage mode: Looking for existing page, found ${allPages.length} pages`);
-        
+
         if (allPages.length > 0) {
           // Try to find a page that's not already tracked
           for (const page of allPages) {
@@ -257,7 +288,7 @@ export class HybridBrowserSession {
               return page;
             }
           }
-          
+
           // If all pages are tracked, use the first available one
           const firstPage = allPages[0];
           if (!firstPage.isClosed()) {
@@ -271,10 +302,10 @@ export class HybridBrowserSession {
             }
           }
         }
-        
+
         throw new Error('No active page available in CDP mode with cdpKeepCurrentPage=true');
       }
-      
+
       // Normal mode: create new page
       if (this.context) {
         console.log('[getCurrentPage] No active page, creating new page');
@@ -282,10 +313,10 @@ export class HybridBrowserSession {
         const tabId = this.generateTabId();
         this.registerNewPage(tabId, newPage);
         this.currentTabId = tabId;
-        
+
         newPage.setDefaultNavigationTimeout(browserConfig.navigationTimeout);
         newPage.setDefaultTimeout(browserConfig.navigationTimeout);
-        
+
         return newPage;
       }
       throw new Error('No browser context available');
@@ -314,7 +345,7 @@ export class HybridBrowserSession {
           zoomLevel: window.outerWidth / window.innerWidth || 1
         };
       }) as { x: number; y: number; devicePixelRatio: number; zoomLevel: number };
-      
+
       // Store scroll position
       this.scrollPosition = { x: scrollInfo.x, y: scrollInfo.y };
       return this.scrollPosition;
@@ -329,22 +360,10 @@ export class HybridBrowserSession {
     return this.getSnapshotForAINative(includeCoordinates, viewportLimit);
   }
 
-  private parseElementFromSnapshot(snapshotText: string, ref: string): { role?: string; text?: string } {
-    const lines = snapshotText.split('\n');
-    for (const line of lines) {
-      if (line.includes(`[ref=${ref}]`)) {
-        const typeMatch = line.match(/^\s*-?\s*([\w-]+)/);
-        const role = typeMatch ? typeMatch[1] : undefined;
-        const textMatch = line.match(/"([^"]*)"/);
-        const text = textMatch ? textMatch[1] : undefined;
-        return { role, text };
-      }
-    }
-    return {};
-  }
 
-  private buildSnapshotIndex(snapshotText: string): Map<string, { role?: string; text?: string }> {
-    const index = new Map<string, { role?: string; text?: string }>();
+  private buildSnapshotIndex(snapshotText: string): Map<string, string|undefined> {
+    // Get ref to role mapping from snapshot text
+    const index = new Map<string, string|undefined>();
     const refRe = /\[ref=([^\]]+)\]/i;
     for (const line of snapshotText.split('\n')) {
       const m = line.match(refRe);
@@ -352,23 +371,111 @@ export class HybridBrowserSession {
       const ref = m[1];
       const roleMatch = line.match(/^\s*-?\s*([a-z0-9_-]+)/i);
       const role = roleMatch ? roleMatch[1].toLowerCase() : undefined;
-      const textMatch = line.match(/"([^"]*)"/);
-      const text = textMatch ? textMatch[1] : undefined;
-      index.set(ref, { role, text });
+      index.set(ref, role);
     }
     return index;
   }
 
+
+  private filterElementsInViewport(
+    elements: Record<string, SnapshotElement>,
+    viewport: { width: number, height: number },
+    scrollPos: { x: number, y: number }
+  ): Record<string, SnapshotElement> {
+    const filtered: Record<string, SnapshotElement> = {};
+    // Apply viewport filtering
+    // boundingBox() returns viewport-relative coordinates, so we don't need to add scroll offsets
+    const viewportLeft = 0;
+    const viewportTop = 0;
+    const viewportRight = viewport.width;
+    const viewportBottom = viewport.height;
+
+    for (const [ref, element] of Object.entries(elements)) {
+      // If element has no coordinates, include it (fallback)
+      if (!element.coordinates) {
+        filtered[ref] = element;
+        continue;
+      }
+
+      const { x, y, width, height } = element.coordinates;
+
+      // Check if element is visible in current viewport
+      // Element is visible if it overlaps with viewport bounds
+      // Since boundingBox() coords are viewport-relative, we compare directly
+      const isVisible = (
+        x < viewportRight &&              // Left edge is before viewport right
+        y < viewportBottom &&             // Top edge is before viewport bottom
+        x + width > viewportLeft &&       // Right edge is after viewport left
+        y + height > viewportTop          // Bottom edge is after viewport top
+      );
+
+      if (isVisible) {
+        filtered[ref] = element;
+      }
+    }
+
+    return filtered;
+  }
+
+
+  private filterSnapshotLines(
+    lines: string[],
+    viewportRefs: Set<string>,
+    tabSize: number = 2
+  ): string[] {
+    // Filter snapshot lines to include only those in viewportRefs
+    // and their context
+    const levelStack: number[] = [];
+    const filteredLines: string[] = [];
+    for (const line of lines) {
+      const refMatch = line.match(/\[ref=([^\]]+)\]/);
+      const indentMatch = line.match(/^(\s*)/);
+      const level = indentMatch ? indentMatch[1].length / tabSize : 0;
+      const prevLevel = levelStack[levelStack.length - 1] ?? 0;
+      const levelDiff = level - prevLevel;
+      // Pop stack when going up to the parent level
+      if (levelDiff <= 0) {
+        while (
+          levelStack.length > 0 &&
+          levelStack[levelStack.length - 1] >= level
+        ) {
+          levelStack.pop();
+        }
+      }
+      // Line has a ref
+      if (refMatch && viewportRefs.has(refMatch[1])) {
+        levelStack.push(level);
+        filteredLines.push(line);
+        continue;
+      }
+      // Line without ref - include if it's a header or direct child of tracked element
+      if (!refMatch && (levelDiff === 0 || levelDiff === 1)) {
+        filteredLines.push(line);
+      }
+    }
+    return filteredLines;
+  }
+
+  private rebuildSnapshotText(
+    originalSnapshot: string,
+    filteredElements: Record<string, SnapshotElement>): string {
+    const lines = originalSnapshot.split('\n');
+    const filteredLines = this.filterSnapshotLines(lines, new Set(Object.keys(filteredElements)));
+    const filteredContent = filteredLines.join('\n');
+    return filteredContent;
+  }
+
+
   private async getSnapshotForAINative(includeCoordinates = false, viewportLimit = false): Promise<SnapshotResult & { timing: DetailedTiming }> {
     const startTime = Date.now();
     const page = await this.getCurrentPage();
-    
+
     try {
       //  Use _snapshotForAI() to properly update _lastAriaSnapshot
       const snapshotStart = Date.now();
-      const snapshotText = await (page as any)._snapshotForAI();
+      const snapshotText = await this.getSnapshot(page);
       const snapshotTime = Date.now() - snapshotStart;
-      
+
       // Extract refs from the snapshot text
       const refPattern = /\[ref=([^\]]+)\]/g;
       const refs: string[] = [];
@@ -376,22 +483,21 @@ export class HybridBrowserSession {
       while ((match = refPattern.exec(snapshotText)) !== null) {
         refs.push(match[1]);
       }
-      
+
       // Get element information including coordinates if needed
       const mappingStart = Date.now();
       const playwrightMapping: Record<string, any> = {};
-      
+
       // Parse element info in a single pass
       const snapshotIndex = this.buildSnapshotIndex(snapshotText);
       for (const ref of refs) {
-        const elementInfo = snapshotIndex.get(ref) || {};
+        const role = snapshotIndex.get(ref) || undefined;
         playwrightMapping[ref] = {
           ref,
-          role: elementInfo.role || 'unknown',
-          text: elementInfo.text || '',
+          role: role || 'unknown',
         };
       }
-      
+
       if (includeCoordinates) {
         // Get coordinates for each ref using aria-ref selector
         for (const ref of refs) {
@@ -399,11 +505,11 @@ export class HybridBrowserSession {
             const selector = `aria-ref=${ref}`;
             const element = await page.locator(selector).first();
             const exists = await element.count() > 0;
-            
+
             if (exists) {
               // Get bounding box
               const boundingBox = await element.boundingBox();
-              
+
               if (boundingBox) {
                 // Add coordinates to existing element info
                 playwrightMapping[ref] = {
@@ -418,26 +524,26 @@ export class HybridBrowserSession {
               }
             }
           } catch (error) {
-            // Failed to get coordinates for element
+            console.warn(`Failed to get coordinates for ref ${ref}:`, error);
           }
         }
       }
-      
+
       const mappingTime = Date.now() - mappingStart;
-      
+
       // Apply viewport filtering if requested
       let finalElements = playwrightMapping;
       let finalSnapshot = snapshotText;
-      
+
       if (viewportLimit) {
         const viewport = page.viewportSize() || { width: 1280, height: 720 };
         const scrollPos = await this.getCurrentScrollPosition();
         finalElements = this.filterElementsInViewport(playwrightMapping, viewport, scrollPos);
         finalSnapshot = this.rebuildSnapshotText(snapshotText, finalElements);
       }
-      
+
       const totalTime = Date.now() - startTime;
-      
+
       return {
         snapshot: finalSnapshot,
         elements: finalElements,
@@ -456,7 +562,7 @@ export class HybridBrowserSession {
     } catch (error) {
       console.error('Failed to get AI snapshot with native mapping:', error);
       const totalTime = Date.now() - startTime;
-      
+
       return {
         snapshot: 'Error: Unable to capture page snapshot',
         elements: {},
@@ -480,122 +586,151 @@ export class HybridBrowserSession {
   /**
    *  Enhanced click implementation with new tab detection and scroll fix
    */
-  private async performClick(page: Page, ref: string): Promise<{ success: boolean; method?: string; error?: string; newTabId?: string; diffSnapshot?: string }> {
-    
+  private async performClick(page: Page, ref: string): Promise<{ success: boolean; method?: string; error?: string; newTabId?: string; diffSnapshot?: string; dialogMessage?: string }> {
+    // Track dialog (alert/confirm/prompt) that may appear during click
+    let dialogMessage: string | undefined;
+
+    const dialogHandler = (dialog: any) => {
+      dialogMessage = dialog.message();
+      // Auto-accept the dialog to prevent blocking
+      dialog.accept().catch(() => {});
+    };
+
+    // Set up dialog handler before clicking
+    page.on('dialog', dialogHandler);
+
     try {
       //  Ensure we have the latest snapshot and mapping
-      await (page as any)._snapshotForAI();
-      
+      await this.getSnapshot(page);
+
       //  Use Playwright's aria-ref selector engine
       const selector = `aria-ref=${ref}`;
-      
+
       // Check if element exists
       const element = await page.locator(selector).first();
       const exists = await element.count() > 0;
-      
+
       if (!exists) {
+        page.off('dialog', dialogHandler);
         return { success: false, error: `Element with ref ${ref} not found` };
       }
-      
+
       const role = await element.getAttribute('role');
       const elementTagName = await element.evaluate(el => el.tagName.toLowerCase());
       const isCombobox = role === 'combobox' || elementTagName === 'combobox';
       const isTextbox = role === 'textbox' || elementTagName === 'input' || elementTagName === 'textarea';
       const shouldCheckDiff = isCombobox || isTextbox;
-      
+
       let snapshotBefore: string | null = null;
+      let comboboxAriaLabel: string | null = null;
       if (shouldCheckDiff) {
-        snapshotBefore = await (page as any)._snapshotForAI();
+        snapshotBefore = await this.getSnapshot(page);
+        // Capture aria-label for combobox to find it again after click (ref may change)
+        if (isCombobox) {
+          comboboxAriaLabel = await element.getAttribute('aria-label');
+          if (!comboboxAriaLabel) {
+            // Try to get accessible name from aria-labelledby or inner text
+            comboboxAriaLabel = await element.evaluate(el => {
+              const labelledBy = el.getAttribute('aria-labelledby');
+              if (labelledBy) {
+                const labelEl = document.getElementById(labelledBy);
+                if (labelEl) return labelEl.textContent?.trim() || null;
+              }
+              return el.textContent?.trim() || null;
+            });
+          }
+        }
       }
-      
+
       //  Check element properties
       const browserConfig = this.configLoader.getBrowserConfig();
       const target = await element.getAttribute(browserConfig.targetAttribute);
       const href = await element.getAttribute(browserConfig.hrefAttribute);
       const onclick = await element.getAttribute(browserConfig.onclickAttribute);
       const tagName = await element.evaluate(el => el.tagName.toLowerCase());
-      
+
       // Check if element naturally opens new tab
       const naturallyOpensNewTab = (
-        target === browserConfig.blankTarget || 
+        target === browserConfig.blankTarget ||
         (onclick && onclick.includes(browserConfig.windowOpenString)) ||
         (tagName === 'a' && href && (href.includes(`javascript:${browserConfig.windowOpenString}`) || href.includes(browserConfig.blankTarget)))
       );
-      
-      //  Open ALL links in new tabs
-      // Check if this is a navigable link
-      const isNavigableLink = tagName === 'a' && href && 
-        !href.startsWith(browserConfig.anchorOnly) &&  // Not an anchor link
-        !href.startsWith(browserConfig.javascriptVoidPrefix) && // Not a void javascript
-        href !== browserConfig.javascriptVoidEmpty && // Not empty javascript
-        href !== browserConfig.anchorOnly; // Not just #
-      
-      const shouldOpenNewTab = naturallyOpensNewTab || isNavigableLink;
-      
-      
-      if (shouldOpenNewTab) {
-        //  Handle new tab opening
-        // If it's a link that doesn't naturally open in new tab, force it
-        if (isNavigableLink && !naturallyOpensNewTab) {
-          await element.evaluate((el, blankTarget) => {
-            if (el.tagName.toLowerCase() === 'a') {
-              el.setAttribute('target', blankTarget);
-            }
-          }, browserConfig.blankTarget);
-        }
-        
+
+      // Only open new tab if element naturally opens one (has target="_blank" or window.open)
+      // Do NOT force all links to open in new tabs
+      if (naturallyOpensNewTab) {
         // Set up popup listener before clicking
         const popupPromise = page.context().waitForEvent('page', { timeout: browserConfig.popupTimeout });
-        
+
         // Click with force to avoid scrolling issues
         await element.click({ force: browserConfig.forceClick });
-        
+
         try {
           // Wait for new page to open
           const newPage = await popupPromise;
-          
+
           // Generate tab ID for the new page
           const newTabId = this.generateTabId();
           this.registerNewPage(newTabId, newPage);
-          
+
           // Set up page properties
           const browserConfig = this.configLoader.getBrowserConfig();
           newPage.setDefaultNavigationTimeout(browserConfig.navigationTimeout);
           newPage.setDefaultTimeout(browserConfig.navigationTimeout);
-          
-          
+
+
           //  Automatically switch to the new tab
           this.currentTabId = newTabId;
           await newPage.bringToFront();
-          
+
           // Wait for new page to be ready
           await newPage.waitForLoadState('domcontentloaded', { timeout: browserConfig.popupTimeout }).catch(() => {});
-          
-          return { success: true, method: 'playwright-aria-ref-newtab', newTabId };
+
+          page.off('dialog', dialogHandler);
+          return { success: true, method: 'playwright-aria-ref-newtab', newTabId, dialogMessage };
         } catch (popupError) {
-          return { success: true, method: 'playwright-aria-ref' };
+          // Popup didn't open within timeout - this is expected for elements that
+          // look like they might open popups but don't (e.g., JS intercepted the click)
+          // The click still executed successfully
+          page.off('dialog', dialogHandler);
+          return { success: true, method: 'playwright-aria-ref', dialogMessage };
         }
       } else {
         //  Add options to prevent scrolling issues
         const browserConfig = this.configLoader.getBrowserConfig();
         await element.click({ force: browserConfig.forceClick });
-        
+
         if (shouldCheckDiff && snapshotBefore) {
           await page.waitForTimeout(300);
-          const snapshotAfter = await (page as any)._snapshotForAI();
-          const diffSnapshot = this.getSnapshotDiff(snapshotBefore, snapshotAfter, ['option', 'menuitem']);
-          
+          const snapshotAfter = await this.getSnapshot(page);
+          let diffSnapshot = this.getSnapshotDiff(snapshotBefore, snapshotAfter, ['option', 'menuitem']);
+
+          // For combobox, find the new ref based on aria-label and prepend to diffSnapshot
+          if (isCombobox && comboboxAriaLabel) {
+            const newComboboxRef = this.findComboboxRefByAriaLabel(snapshotAfter, comboboxAriaLabel);
+            if (newComboboxRef) {
+              // Find the full line for this combobox in the snapshot
+              const comboboxLine = this.findSnapshotLineByRef(snapshotAfter, newComboboxRef);
+              if (comboboxLine) {
+                diffSnapshot = comboboxLine + (diffSnapshot ? '\n' + diffSnapshot : '');
+              }
+            }
+          }
+
           if (diffSnapshot && diffSnapshot.trim() !== '') {
-            return { success: true, method: 'playwright-aria-ref', diffSnapshot };
+            page.off('dialog', dialogHandler);
+            return { success: true, method: 'playwright-aria-ref', diffSnapshot, dialogMessage };
           }
         }
-        
-        return { success: true, method: 'playwright-aria-ref' };
+
+        page.off('dialog', dialogHandler);
+        return { success: true, method: 'playwright-aria-ref', dialogMessage };
       }
-      
+
     } catch (error) {
+      page.off('dialog', dialogHandler);
       console.error('[performClick] Exception during click for ref: %s', ref, error);
-      return { success: false, error: `Click failed with exception: ${error}` };
+      return { success: false, error: `Click failed with exception: ${error}`, dialogMessage };
     }
   }
 
@@ -609,10 +744,10 @@ export class HybridBrowserSession {
     while ((match = refPattern.exec(snapshotBefore)) !== null) {
       refsBefore.add(match[1]);
     }
-    
+
     const lines = snapshotAfter.split('\n');
     const newElements: string[] = [];
-    
+
     for (const line of lines) {
       const refMatch = line.match(/\[ref=([^\]]+)\]/);
       if (refMatch && !refsBefore.has(refMatch[1])) {
@@ -620,18 +755,69 @@ export class HybridBrowserSession {
           const rolePattern = new RegExp(`\\b${role}\\b`, 'i');
           return rolePattern.test(line);
         });
-        
+
         if (hasTargetRole) {
           newElements.push(line.trim());
         }
       }
     }
-    
+
     if (newElements.length > 0) {
       return newElements.join('\n');
     } else {
       return '';
     }
+  }
+
+  /**
+   * Find a combobox ref in the snapshot by its aria-label or expanded state
+   */
+  private findComboboxRefByAriaLabel(snapshot: string, ariaLabel: string): string | null {
+    const lines = snapshot.split('\n');
+    // Escape special regex characters in ariaLabel
+    const escapedLabel = ariaLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    // First, try to find by aria-label
+    for (const line of lines) {
+      const isCombobox = /\bcombobox\b/i.test(line);
+      const hasLabel = new RegExp(`["']${escapedLabel}["']`, 'i').test(line) ||
+                       line.includes(ariaLabel);
+
+      if (isCombobox && hasLabel) {
+        const refMatch = line.match(/\[ref=([^\]]+)\]/);
+        if (refMatch) {
+          return refMatch[1];
+        }
+      }
+    }
+
+    // Fallback: find the expanded combobox (since we just clicked it)
+    for (const line of lines) {
+      const isCombobox = /\bcombobox\b/i.test(line);
+      const isExpanded = /\[expanded\]/i.test(line);
+
+      if (isCombobox && isExpanded) {
+        const refMatch = line.match(/\[ref=([^\]]+)\]/);
+        if (refMatch) {
+          return refMatch[1];
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Find the full snapshot line for a given ref
+   */
+  private findSnapshotLineByRef(snapshot: string, ref: string): string | null {
+    const lines = snapshot.split('\n');
+    for (const line of lines) {
+      if (line.includes(`[ref=${ref}]`)) {
+        return line.trim();
+      }
+    }
+    return null;
   }
 
   /**
@@ -641,12 +827,12 @@ export class HybridBrowserSession {
   private async performType(page: Page, ref: string | undefined, text: string | undefined, inputs?: Array<{ ref: string; text: string }>): Promise<{ success: boolean; error?: string; details?: Record<string, any>; diffSnapshot?: string }> {
     try {
       // Ensure we have the latest snapshot
-      await (page as any)._snapshotForAI();
-      
+      await this.getSnapshot(page);
+
       // Handle multiple inputs if provided
       if (inputs && inputs.length > 0) {
         const results: Record<string, { success: boolean; error?: string }> = {};
-        
+
         for (const input of inputs) {
           const singleResult = await this.performType(page, input.ref, input.text);
           results[input.ref] = {
@@ -654,31 +840,31 @@ export class HybridBrowserSession {
             error: singleResult.error
           };
         }
-        
+
         // Check if all inputs were successful
         const allSuccess = Object.values(results).every(r => r.success);
         const errors = Object.entries(results)
           .filter(([_, r]) => !r.success)
           .map(([ref, r]) => `${ref}: ${r.error}`)
           .join('; ');
-        
+
         return {
           success: allSuccess,
           error: allSuccess ? undefined : `Some inputs failed: ${errors}`,
           details: results
         };
       }
-      
+
       // Handle single input (backward compatibility)
       if (ref && text !== undefined) {
         const selector = `aria-ref=${ref}`;
         const element = await page.locator(selector).first();
-        
+
         const exists = await element.count() > 0;
         if (!exists) {
           return { success: false, error: `Element with ref ${ref} not found` };
         }
-        
+
         // Get element attributes to check if it's readonly or a special input type
         let originalPlaceholder: string | null = null;
         let isReadonly = false;
@@ -686,7 +872,7 @@ export class HybridBrowserSession {
         let isCombobox = false;
         let isTextbox = false;
         let shouldCheckDiff = false;
-        
+
         try {
           // Get element info in one evaluation to minimize interactions
           const elementInfo = await element.evaluate((el: any) => {
@@ -700,24 +886,24 @@ export class HybridBrowserSession {
               ariaHaspopup: el.getAttribute('aria-haspopup')
             };
           });
-          
+
           originalPlaceholder = elementInfo.placeholder;
           isReadonly = elementInfo.readonly;
           elementType = elementInfo.type;
-          isCombobox = elementInfo.role === 'combobox' || 
+          isCombobox = elementInfo.role === 'combobox' ||
                        elementInfo.tagName === 'combobox' ||
                        elementInfo.ariaHaspopup === 'listbox';
-          isTextbox = elementInfo.role === 'textbox' || 
-                      elementInfo.tagName === 'input' || 
+          isTextbox = elementInfo.role === 'textbox' ||
+                      elementInfo.tagName === 'input' ||
                       elementInfo.tagName === 'textarea';
           shouldCheckDiff = isCombobox || isTextbox;
-          
+
         } catch (e) {
           console.log(`Warning: Failed to get element attributes: ${e}`);
         }
-        
+
         // Get snapshot before action to record existing elements
-        const snapshotBefore = await (page as any)._snapshotForAI();
+        const snapshotBefore = await this.getSnapshot(page);
         const existingRefs = new Set<string>();
         const refPattern = /\[ref=([^\]]+)\]/g;
         let match;
@@ -725,11 +911,11 @@ export class HybridBrowserSession {
           existingRefs.add(match[1]);
         }
         console.log(`Found ${existingRefs.size} total elements before action`);
-        
+
         // If element is readonly or a date/time input, skip fill attempt and go directly to click
         if (isReadonly || ['date', 'datetime-local', 'time'].includes(elementType || '')) {
           console.log(`Element ref=${ref} is readonly or date/time input, skipping direct fill attempt`);
-          
+
           // Click with force option to avoid scrolling
           try {
             await element.click({ force: true });
@@ -740,38 +926,58 @@ export class HybridBrowserSession {
             console.log(`Warning: Failed to click element: ${clickError}`);
           }
         } else {
-          // For normal inputs, click first then try to fill
+          // Try to fill the element, with fallback to click-then-fill strategy
+          let alreadyClicked = false;
           try {
-            await element.click({ force: true });
-            console.log(`Clicked element ref=${ref} before typing`);
-          } catch (clickError) {
-            console.log(`Warning: Failed to click element before typing: ${clickError}`);
-          }
-          
-          // Try to fill the element directly
-          try {
-            // Use force option to avoid scrolling during fill
-            await element.fill(text, { timeout: 3000, force: true });
-            
-            // If this element might show dropdown, wait and check for new elements
-            if (shouldCheckDiff) {
-              await page.waitForTimeout(300);
-              const snapshotAfter = await (page as any)._snapshotForAI();
-              const diffSnapshot = this.getSnapshotDiff(snapshotBefore, snapshotAfter, ['option', 'menuitem']);
-              
-              if (diffSnapshot && diffSnapshot.trim() !== '') {
-                return { success: true, diffSnapshot };
+            let fillSuccess = false;
+
+            try {
+              // Strategy 1: Try to fill directly without clicking (for modern inputs like Google Flights combobox)
+              await element.fill(text, { timeout: 3000, force: true });
+              fillSuccess = true;
+              console.log(`Filled element ref=${ref} directly without clicking`);
+            } catch (directFillError) {
+              // Strategy 2: Click first, then fill (for traditional inputs that need activation)
+              console.log(`Direct fill failed for ref=${ref}, trying click-then-fill strategy`);
+              try {
+                await element.click({ force: true });
+                alreadyClicked = true;
+                console.log(`Clicked element ref=${ref} before typing`);
+              } catch (clickError) {
+                console.log(`Warning: Failed to click element before typing: ${clickError}`);
+              }
+
+              try {
+                await element.fill(text, { timeout: 3000, force: true });
+                fillSuccess = true;
+                console.log(`Filled element ref=${ref} after clicking`);
+              } catch (secondFillError) {
+                // Will be handled by outer catch block below
+                throw secondFillError;
               }
             }
-            
-            return { success: true };
+
+            if (fillSuccess) {
+              // If this element might show dropdown, wait and check for new elements
+              if (shouldCheckDiff) {
+                await page.waitForTimeout(300);
+                const snapshotAfter = await this.getSnapshot(page);
+                const diffSnapshot = this.getSnapshotDiff(snapshotBefore, snapshotAfter, ['option', 'menuitem']);
+
+                if (diffSnapshot && diffSnapshot.trim() !== '') {
+                  return { success: true, diffSnapshot };
+                }
+              }
+
+              return { success: true };
+            }
           } catch (fillError: any) {
             // Log the error for debugging
             console.log(`Fill error for ref ${ref}: ${fillError.message}`);
-            
+
             // Check for various error messages that indicate the element is not fillable
             const errorMessage = fillError.message.toLowerCase();
-            if (errorMessage.includes('not an <input>') || 
+            if (errorMessage.includes('not an <input>') ||
               errorMessage.includes('not have a role allowing') ||
               errorMessage.includes('element is not') ||
               errorMessage.includes('cannot type') ||
@@ -779,49 +985,54 @@ export class HybridBrowserSession {
               errorMessage.includes('not editable') ||
               errorMessage.includes('timeout') ||
               errorMessage.includes('timeouterror')) {
-            
-            // Click the element again to trigger dynamic content (like date pickers)
-            try {
-              await element.click({ force: true });
-              console.log(`Clicked element ref=${ref} again to trigger dynamic content`);
-              // Wait for potential dynamic content to appear
+
+            // Click the element again to trigger dynamic content (like date pickers), but only if we haven't clicked yet
+            if (!alreadyClicked) {
+              try {
+                await element.click({ force: true });
+                console.log(`Clicked element ref=${ref} to trigger dynamic content`);
+                // Wait for potential dynamic content to appear
+                await page.waitForTimeout(500);
+              } catch (clickError) {
+                console.log(`Warning: Failed to click element to trigger dynamic content: ${clickError}`);
+              }
+            } else {
+              // We already clicked during the click-then-fill strategy
               await page.waitForTimeout(500);
-            } catch (clickError) {
-              console.log(`Warning: Failed to click element to trigger dynamic content: ${clickError}`);
             }
-            
+
             // Step 1: Try to find input elements within the clicked element
             const inputSelector = `input:visible, textarea:visible, [contenteditable="true"]:visible, [role="textbox"]:visible`;
             const inputElement = await element.locator(inputSelector).first();
-            
+
             const inputExists = await inputElement.count() > 0;
             if (inputExists) {
               console.log(`Found input element within ref ${ref}, attempting to fill`);
               try {
                 await inputElement.fill(text, { force: true });
-                
+
                 // If element might show dropdown, check for new elements
                 if (shouldCheckDiff) {
                   await page.waitForTimeout(300);
-                  const snapshotFinal = await (page as any)._snapshotForAI();
+                  const snapshotFinal = await this.getSnapshot(page);
                   const diffSnapshot = this.getSnapshotDiff(snapshotBefore, snapshotFinal, ['option', 'menuitem']);
-                  
+
                   if (diffSnapshot && diffSnapshot.trim() !== '') {
                     return { success: true, diffSnapshot };
                   }
                 }
-                
+
                 return { success: true };
               } catch (innerError) {
                 console.log(`Failed to fill child element: ${innerError}`);
               }
             }
-            
+
             // Step 2: Look for new elements that appeared after the action
             console.log(`Looking for new elements that appeared after action...`);
-            
+
             // Get snapshot after action to find new elements
-            const snapshotAfter = await (page as any)._snapshotForAI();
+            const snapshotAfter = await this.getSnapshot(page);
             const newRefs = new Set<string>();
             const afterRefPattern = /\[ref=([^\]]+)\]/g;
             let afterMatch;
@@ -831,24 +1042,24 @@ export class HybridBrowserSession {
                 newRefs.add(refId);
               }
             }
-            
+
             console.log(`Found ${newRefs.size} new elements after action`);
-            
+
             // If we have a placeholder, try to find new input elements with that placeholder
             if (originalPlaceholder && newRefs.size > 0) {
               console.log(`Looking for new input elements with placeholder: ${originalPlaceholder}`);
-              
+
               // Try each new ref to see if it's an input with our placeholder
               for (const newRef of newRefs) {
                 try {
                   const newElement = await page.locator(`aria-ref=${newRef}`).first();
                   const tagName = await newElement.evaluate(el => el.tagName.toLowerCase()).catch(() => null);
-                  
+
                   if (tagName === 'input' || tagName === 'textarea') {
                     const placeholder = await newElement.getAttribute('placeholder').catch(() => null);
                     if (placeholder === originalPlaceholder) {
                       console.log(`Found new input element with matching placeholder: ref=${newRef}`);
-                      
+
                       // Check if it's visible and fillable
                       const elementInfo = await newElement.evaluate((el: any) => {
                         return {
@@ -861,21 +1072,21 @@ export class HybridBrowserSession {
                         };
                       });
                       console.log(`New element details:`, JSON.stringify(elementInfo));
-                      
+
                       // Try to fill it with force to avoid scrolling
                       await newElement.fill(text, { force: true });
-                      
+
                       // If element might show dropdown, check for new elements
                       if (shouldCheckDiff) {
                         await page.waitForTimeout(300);
-                        const snapshotFinal = await (page as any)._snapshotForAI();
+                        const snapshotFinal = await this.getSnapshot(page);
                         const diffSnapshot = this.getSnapshotDiff(snapshotBefore, snapshotFinal, ['option', 'menuitem']);
-                        
+
                         if (diffSnapshot && diffSnapshot.trim() !== '') {
                           return { success: true, diffSnapshot };
                         }
                       }
-                      
+
                       return { success: true };
                     }
                   }
@@ -884,21 +1095,21 @@ export class HybridBrowserSession {
                 }
               }
             }
-            
+
             console.log(`No suitable input element found for ref ${ref}`);
             }
             // Re-throw the original error if we couldn't find an input element
             throw fillError;
           }
         }
-        
+
         // If we skipped the fill attempt (readonly elements), look for new elements directly
         if (isReadonly || ['date', 'datetime-local', 'time'].includes(elementType || '')) {
           // Look for new elements that appeared after clicking
           console.log(`Looking for new elements that appeared after clicking readonly element...`);
-          
+
           // Get snapshot after action to find new elements
-          const snapshotAfter = await (page as any)._snapshotForAI();
+          const snapshotAfter = await this.getSnapshot(page);
           const newRefs = new Set<string>();
           const afterRefPattern = /\[ref=([^\]]+)\]/g;
           let afterMatch;
@@ -908,24 +1119,24 @@ export class HybridBrowserSession {
               newRefs.add(refId);
             }
           }
-          
+
           console.log(`Found ${newRefs.size} new elements after clicking readonly element`);
-          
+
           // If we have a placeholder, try to find new input elements with that placeholder
           if (originalPlaceholder && newRefs.size > 0) {
             console.log(`Looking for new input elements with placeholder: ${originalPlaceholder}`);
-            
+
             // Try each new ref to see if it's an input with our placeholder
             for (const newRef of newRefs) {
               try {
                 const newElement = await page.locator(`aria-ref=${newRef}`).first();
                 const tagName = await newElement.evaluate(el => el.tagName.toLowerCase()).catch(() => null);
-                
+
                 if (tagName === 'input' || tagName === 'textarea') {
                   const placeholder = await newElement.getAttribute('placeholder').catch(() => null);
                   if (placeholder === originalPlaceholder) {
                     console.log(`Found new input element with matching placeholder: ref=${newRef}`);
-                    
+
                     // Check if it's visible and fillable
                     const elementInfo = await newElement.evaluate((el: any) => {
                       return {
@@ -938,21 +1149,21 @@ export class HybridBrowserSession {
                       };
                     });
                     console.log(`New element details:`, JSON.stringify(elementInfo));
-                    
+
                     // Try to fill it with force to avoid scrolling
                     await newElement.fill(text, { force: true });
-                    
+
                     // If element might show dropdown, check for new elements
                     if (shouldCheckDiff) {
                       await page.waitForTimeout(300);
-                      const snapshotFinal = await (page as any)._snapshotForAI();
+                      const snapshotFinal = await this.getSnapshot(page);
                       const diffSnapshot = this.getSnapshotDiff(snapshotBefore, snapshotFinal, ['option', 'menuitem']);
-                      
+
                       if (diffSnapshot && diffSnapshot.trim() !== '') {
                         return { success: true, diffSnapshot };
                       }
                     }
-                    
+
                     return { success: true };
                   }
                 }
@@ -961,12 +1172,12 @@ export class HybridBrowserSession {
               }
             }
           }
-          
+
           console.log(`No suitable input element found for readonly ref ${ref}`);
           return { success: false, error: `Element ref=${ref} is readonly and no suitable input was found` };
         }
       }
-      
+
       return { success: false, error: 'No valid input provided' };
     } catch (error) {
       return { success: false, error: `Type failed: ${error}` };
@@ -979,20 +1190,20 @@ export class HybridBrowserSession {
   private async performSelect(page: Page, ref: string, value: string): Promise<{ success: boolean; error?: string }> {
     try {
       // Ensure we have the latest snapshot
-      await (page as any)._snapshotForAI();
-      
+      await this.getSnapshot(page);
+
       // Use Playwright's aria-ref selector
       const selector = `aria-ref=${ref}`;
       const element = await page.locator(selector).first();
-      
+
       const exists = await element.count() > 0;
       if (!exists) {
         return { success: false, error: `Element with ref ${ref} not found` };
       }
-      
+
       // Select value using Playwright's built-in selectOption method
       await element.selectOption(value);
-      
+
       return { success: true };
     } catch (error) {
       return { success: false, error: `Select failed: ${error}` };
@@ -1027,7 +1238,7 @@ export class HybridBrowserSession {
         default:
           return { success: false, error: `Invalid control action: ${control}` };
       }
-      
+
       return { success: true };
     } catch (error) {
       return { success: false, error: `Mouse action failed: ${error}` };
@@ -1040,39 +1251,39 @@ export class HybridBrowserSession {
   private async performMouseDrag(page: Page, fromRef: string, toRef: string): Promise<{ success: boolean; error?: string }> {
     try {
       // Ensure we have the latest snapshot
-      await (page as any)._snapshotForAI();
-      
+      await this.getSnapshot(page);
+
       // Get elements using Playwright's aria-ref selector
       const fromSelector = `aria-ref=${fromRef}`;
       const toSelector = `aria-ref=${toRef}`;
-      
+
       const fromElement = await page.locator(fromSelector).first();
       const toElement = await page.locator(toSelector).first();
-      
+
       // Check if elements exist
       const fromExists = await fromElement.count() > 0;
       const toExists = await toElement.count() > 0;
-      
+
       if (!fromExists) {
         return { success: false, error: `Source element with ref ${fromRef} not found` };
       }
-      
+
       if (!toExists) {
         return { success: false, error: `Target element with ref ${toRef} not found` };
       }
-      
+
       // Get the center coordinates of both elements
       const fromBox = await fromElement.boundingBox();
       const toBox = await toElement.boundingBox();
-      
+
       if (!fromBox) {
         return { success: false, error: `Could not get bounding box for source element with ref ${fromRef}` };
       }
-      
+
       if (!toBox) {
         return { success: false, error: `Could not get bounding box for target element with ref ${toRef}` };
       }
-      
+
       const fromX = fromBox.x + fromBox.width / 2;
       const fromY = fromBox.y + fromBox.height / 2;
       const toX = toBox.x + toBox.width / 2;
@@ -1094,54 +1305,57 @@ export class HybridBrowserSession {
   async executeAction(action: BrowserAction): Promise<ActionResult> {
     const startTime = Date.now();
     const page = await this.getCurrentPage();
-    
+
     let elementSearchTime = 0;
     let actionExecutionTime = 0;
     let stabilityWaitTime = 0;
-    
+
     try {
       const elementSearchStart = Date.now();
-      
+
       //  No need to pre-fetch snapshot - each action method handles this
-      
+
       let newTabId: string | undefined;
       let customMessage: string | undefined;
       let actionDetails: Record<string, any> | undefined;
-      
+
       switch (action.type) {
         case 'click': {
           elementSearchTime = Date.now() - elementSearchStart;
           const clickStart = Date.now();
-          
+
           //  Use simplified click logic
           const clickResult = await this.performClick(page, action.ref);
-          
+
           if (!clickResult.success) {
             throw new Error(`Click failed: ${clickResult.error}`);
           }
-          
+
           //  Capture new tab ID if present
           newTabId = clickResult.newTabId;
-          
-          // Capture diff snapshot if present
-          if (clickResult.diffSnapshot) {
-            actionDetails = { diffSnapshot: clickResult.diffSnapshot };
+
+          // Capture diff snapshot and dialog message if present
+          if (clickResult.diffSnapshot || clickResult.dialogMessage) {
+            actionDetails = {
+              ...(clickResult.diffSnapshot && { diffSnapshot: clickResult.diffSnapshot }),
+              ...(clickResult.dialogMessage && { dialogMessage: clickResult.dialogMessage })
+            };
           }
-          
+
           actionExecutionTime = Date.now() - clickStart;
           break;
         }
-          
+
         case 'type': {
           elementSearchTime = Date.now() - elementSearchStart;
           const typeStart = Date.now();
 
           const typeResult = await this.performType(page, action.ref, action.text, action.inputs);
-          
+
           if (!typeResult.success) {
             throw new Error(`Type failed: ${typeResult.error}`);
           }
-          
+
           // Set custom message and details if multiple inputs were used
           if (typeResult.details) {
             const successCount = Object.values(typeResult.details).filter((r: any) => r.success).length;
@@ -1149,7 +1363,7 @@ export class HybridBrowserSession {
             customMessage = `Typed text into ${successCount}/${totalCount} elements`;
             actionDetails = typeResult.details;
           }
-          
+
           // Capture diff snapshot if present
           if (typeResult.diffSnapshot) {
             if (!actionDetails) {
@@ -1157,25 +1371,25 @@ export class HybridBrowserSession {
             }
             actionDetails.diffSnapshot = typeResult.diffSnapshot;
           }
-          
+
           actionExecutionTime = Date.now() - typeStart;
           break;
         }
-          
+
         case 'select': {
           elementSearchTime = Date.now() - elementSearchStart;
           const selectStart = Date.now();
-          
+
           const selectResult = await this.performSelect(page, action.ref, action.value);
 
           if (!selectResult.success) {
             throw new Error(`Select failed: ${selectResult.error}`);
           }
-          
+
           actionExecutionTime = Date.now() - selectStart;
           break;
         }
-          
+
         case 'scroll': {
           elementSearchTime = Date.now() - elementSearchStart;
           const scrollStart = Date.now();
@@ -1188,7 +1402,7 @@ export class HybridBrowserSession {
           actionExecutionTime = Date.now() - scrollStart;
           break;
         }
-          
+
         case 'enter': {
           elementSearchTime = Date.now() - elementSearchStart;
           const enterStart = Date.now();
@@ -1231,7 +1445,7 @@ export class HybridBrowserSession {
           actionExecutionTime = Date.now() - keyPressStart;
           break;
         }
-          
+
         default:
           throw new Error(`Unknown action type: ${(action as any).type}`);
       }
@@ -1240,9 +1454,9 @@ export class HybridBrowserSession {
       const stabilityStart = Date.now();
       const stabilityResult = await this.waitForPageStability(page);
       stabilityWaitTime = Date.now() - stabilityStart;
-      
+
       const totalTime = Date.now() - startTime;
-      
+
       return {
         success: true,
         message: customMessage || `Action ${action.type} executed successfully`,
@@ -1253,9 +1467,11 @@ export class HybridBrowserSession {
           stability_wait_time_ms: stabilityWaitTime,
           dom_content_loaded_time_ms: stabilityResult.domContentLoadedTime,
           network_idle_time_ms: stabilityResult.networkIdleTime,
+          dom_stability_time_ms: stabilityResult.domStabilityTime,
         },
-        ...(newTabId && { newTabId }), //  Include new tab ID if present
-        ...(actionDetails && { details: actionDetails }), // Include action details if present
+        note: stabilityResult.note,
+        ...(newTabId && { newTabId }),
+        ...(actionDetails && { details: actionDetails }),
       };
     } catch (error) {
       const totalTime = Date.now() - startTime;
@@ -1274,44 +1490,157 @@ export class HybridBrowserSession {
 
   /**
    * Wait for DOM to stop changing for a specified duration
+   * @param page - The Playwright page instance
+   * @param maxWaitTime - Maximum time to wait for stability in ms (uses config value)
+   * @returns Object indicating if loading elements were detected
    */
-  private async waitForDOMStability(page: Page, maxWaitTime: number = 500): Promise<void> {
-    const startTime = Date.now();
-    const stabilityThreshold = 100; // Consider stable if no changes for 100ms
-    let lastChangeTime = Date.now();
-    
+  private async waitForDOMStability(page: Page, maxWaitTime: number): Promise<{ hasLoadingElements: boolean }> {
+    const browserConfig = this.configLoader.getBrowserConfig();
+    const stabilityThreshold = browserConfig.domStabilityThreshold;
+    let hasLoadingElements = false;
+
+    // Pass the selector as a parameter to avoid closure issues
+    const loadingSelector = LOADING_ELEMENTS_SELECTOR;
+
     try {
-      // Monitor DOM changes
-      await page.evaluate(() => {
-        let changeCount = 0;
-        (window as any).__domStabilityCheck = { changeCount: 0, lastChange: Date.now() };
-        
-        const observer = new MutationObserver(() => {
-          (window as any).__domStabilityCheck.changeCount++;
-          (window as any).__domStabilityCheck.lastChange = Date.now();
+      // Monitor DOM changes and loading elements
+      await page.evaluate((selector: string) => {
+        // Word boundary regex patterns for accurate loading class detection
+        const loadingPatterns = [
+          /\bloading\b/i,
+          /\bloader\b/i,
+          /\bspinner\b/i,
+          /\bspin\b/i,
+        ];
+
+        // Helper function to check if className contains loading indicators using word boundaries
+        const hasLoadingClass = (className: string): boolean => {
+          return loadingPatterns.some(pattern => pattern.test(className));
+        };
+
+        // Helper function to check if any loading elements exist in the DOM
+        const checkForLoadingElements = (): boolean => {
+          const loadingElements = document.querySelectorAll(selector);
+          // Double-check with regex patterns to reduce false positives
+          for (const el of Array.from(loadingElements)) {
+            const cls = el.getAttribute('class') || '';
+            if (hasLoadingClass(cls)) {
+              return true;
+            }
+          }
+          return false;
+        };
+
+        (window as any).__domStabilityCheck = {
+          changeCount: 0,
+          lastChange: Date.now(),
+          hasLoadingElements: checkForLoadingElements()
+        };
+
+        const observer = new MutationObserver((mutations: MutationRecord[]) => {
+          const check = (window as any).__domStabilityCheck;
+          check.changeCount++;
+          check.lastChange = Date.now();
+
+          let loadingAdded = false;
+          let loadingRemoved = false;
+
+          for (const mutation of mutations) {
+            // Check if class attribute changed to add/remove loading
+            if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
+              const target = mutation.target as Element;
+              const oldValue = mutation.oldValue || '';
+              const newValue = target.getAttribute('class') || '';
+
+              const hadLoading = hasLoadingClass(oldValue);
+              const hasLoading = hasLoadingClass(newValue);
+
+              if (!hadLoading && hasLoading) {
+                loadingAdded = true;
+              } else if (hadLoading && !hasLoading) {
+                loadingRemoved = true;
+              }
+            }
+
+            // Check added/removed nodes for loading elements
+            if (mutation.type === 'childList') {
+              for (const node of Array.from(mutation.addedNodes)) {
+                if (node.nodeType === Node.ELEMENT_NODE) {
+                  const el = node as Element;
+                  const cls = el.getAttribute('class') || '';
+                  if (hasLoadingClass(cls)) {
+                    loadingAdded = true;
+                    break;
+                  }
+                  // Check descendants
+                  const descendants = el.querySelectorAll(selector);
+                  for (const desc of Array.from(descendants)) {
+                    if (hasLoadingClass(desc.getAttribute('class') || '')) {
+                      loadingAdded = true;
+                      break;
+                    }
+                  }
+                }
+              }
+
+              for (const node of Array.from(mutation.removedNodes)) {
+                if (node.nodeType === Node.ELEMENT_NODE) {
+                  const el = node as Element;
+                  const cls = el.getAttribute('class') || '';
+                  if (hasLoadingClass(cls)) {
+                    loadingRemoved = true;
+                    break;
+                  }
+                  const descendants = el.querySelectorAll(selector);
+                  for (const desc of Array.from(descendants)) {
+                    if (hasLoadingClass(desc.getAttribute('class') || '')) {
+                      loadingRemoved = true;
+                      break;
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          if (loadingAdded) {
+            check.hasLoadingElements = true;
+          }
+
+          if (loadingRemoved) {
+            check.hasLoadingElements = checkForLoadingElements();
+          }
         });
-        
-        observer.observe(document.body, { 
-          childList: true, 
+
+        observer.observe(document.body, {
+          childList: true,
           subtree: true,
           attributes: true,
+          attributeOldValue: true,
           characterData: true
         });
-        
+
         (window as any).__domStabilityObserver = observer;
-      });
-      
-      // Wait until no changes for stabilityThreshold or timeout
+      }, loadingSelector);
+
+      // Wait until no changes for stabilityThreshold, or timeout
       await page.waitForFunction(
-        (threshold) => {
+        (threshold: number) => {
           const check = (window as any).__domStabilityCheck;
-          return check && (Date.now() - check.lastChange) > threshold;
+          if (!check) return true;
+          return (Date.now() - check.lastChange) > threshold;
         },
         stabilityThreshold,
         { timeout: Math.max(0, maxWaitTime) }
       ).catch(() => {});
+
+      // Get final loading state
+      hasLoadingElements = await page.evaluate(() => {
+        const check = (window as any).__domStabilityCheck;
+        return check ? check.hasLoadingElements : false;
+      });
     } finally {
-      // Cleanup
+      // Cleanup observer
       await page.evaluate(() => {
         const observer = (window as any).__domStabilityObserver;
         if (observer) observer.disconnect();
@@ -1319,36 +1648,91 @@ export class HybridBrowserSession {
         delete (window as any).__domStabilityCheck;
       }).catch(() => {});
     }
+
+    return { hasLoadingElements };
   }
 
-  private async waitForPageStability(page: Page): Promise<{ domContentLoadedTime: number; networkIdleTime: number }> {
-    let domContentLoadedTime = 0;
-    let networkIdleTime = 0;
-    
+  async waitForPageStability(page: Page): Promise<PageStabilityResult> {
+    const defaultResult: PageStabilityResult = {
+      domContentLoadedTime: 0,
+      networkIdleTime: 0,
+      domStabilityTime: 0,
+      hasLoadingElements: false,
+      note: ''
+    };
+
     try {
-      const domStart = Date.now();
       const browserConfig = this.configLoader.getBrowserConfig();
-      await page.waitForLoadState(browserConfig.domContentLoadedState as any, { timeout: browserConfig.pageStabilityTimeout });
-      domContentLoadedTime = Date.now() - domStart;
-      
-      const networkStart = Date.now();
-      await page.waitForLoadState(browserConfig.networkIdleState as any, { timeout: browserConfig.networkIdleTimeout });
-      networkIdleTime = Date.now() - networkStart;
+
+      const maxTimeout = Math.max(
+        browserConfig.domContentLoadedTimeout,
+        browserConfig.networkIdleTimeout,
+        browserConfig.domStabilityTimeout
+      );
+
+      // Track timeout for cleanup
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+      const start = Date.now();
+      await page.waitForLoadState(browserConfig.domContentLoadedState as any, {
+        timeout: browserConfig.domContentLoadedTimeout
+      });
+      const domContentLoadedTime = Date.now() - start;
+
+      const networkIdlePromise = (async () => {
+        const startTime = Date.now();
+        await page.waitForLoadState(browserConfig.networkIdleState as any, {
+          timeout: browserConfig.networkIdleTimeout
+        });
+        return Date.now() - startTime;
+      })();
+
+      const domStabilityPromise = (async () => {
+        const startTime = Date.now();
+        const result = await this.waitForDOMStability(page, browserConfig.domStabilityTimeout);
+        return {
+          time: Date.now() - startTime,
+          hasLoadingElements: result.hasLoadingElements
+        };
+      })();
+
+      // Create timeout promise with cleanup capability
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error('max timeout')), maxTimeout);
+      });
+
+      try {
+        const [networkIdleTime, domStabilityResult] = await Promise.race([
+          Promise.all([networkIdlePromise, domStabilityPromise]),
+          timeoutPromise
+        ]);
+
+        return {
+          domContentLoadedTime,
+          networkIdleTime,
+          domStabilityTime: domStabilityResult.time,
+          hasLoadingElements: domStabilityResult.hasLoadingElements,
+          note: domStabilityResult.hasLoadingElements ? LOADING_STATE_NOTE : ''
+        };
+      } finally {
+        // Clean up timeout to prevent memory leak
+        if (timeoutId !== null) {
+          clearTimeout(timeoutId);
+        }
+      }
     } catch (error) {
-      // Continue even if stability wait fails
+      return defaultResult;
     }
-    
-    return { domContentLoadedTime, networkIdleTime };
   }
 
   async visitPage(url: string): Promise<ActionResult & { newTabId?: string }> {
     const startTime = Date.now();
-    
+
     try {
       // Get current page to check if it's blank
       let currentPage: Page;
       let currentUrl: string;
-      
+
       try {
         currentPage = await this.getCurrentPage();
         currentUrl = currentPage.url();
@@ -1357,36 +1741,36 @@ export class HybridBrowserSession {
         console.log('[visitPage] Failed to get current page:', error);
         throw new Error(`No active page available: ${error?.message || error}`);
       }
-      
+
       //  Check if current page is blank or if this is the first navigation
       const browserConfig = this.configLoader.getBrowserConfig();
-      
+
       // Use unified blank page detection
       const isBlankPage = this.isBlankPageUrl(currentUrl) || currentUrl === browserConfig.defaultStartUrl;
-      
+
       const shouldUseCurrentTab = isBlankPage || !this.hasNavigatedBefore;
-      
-      
+
+
       if (shouldUseCurrentTab) {
         // Navigate in current tab if it's blank
-        
+
         const navigationStart = Date.now();
         const browserConfig = this.configLoader.getBrowserConfig();
-        await currentPage.goto(url, { 
+        await currentPage.goto(url, {
           timeout: browserConfig.navigationTimeout,
           waitUntil: browserConfig.domContentLoadedState as any
         });
-        
+
         // Reset scroll position after navigation
         this.scrollPosition = { x: 0, y: 0 };
-        
+
         //  Mark that we've navigated
         this.hasNavigatedBefore = true;
-        
+
         const navigationTime = Date.now() - navigationStart;
         const stabilityResult = await this.waitForPageStability(currentPage);
         const totalTime = Date.now() - startTime;
-        
+
         return {
           success: true,
           message: `Navigated to ${url}`,
@@ -1395,20 +1779,22 @@ export class HybridBrowserSession {
             navigation_time_ms: navigationTime,
             dom_content_loaded_time_ms: stabilityResult.domContentLoadedTime,
             network_idle_time_ms: stabilityResult.networkIdleTime,
+            dom_stability_time_ms: stabilityResult.domStabilityTime,
           },
+          note: stabilityResult.note,
         };
       } else {
         //  Open in new tab if current page has content
         if (!this.context) {
           throw new Error('Browser context not initialized');
         }
-        
+
         const navigationStart = Date.now();
-        
+
         // In CDP mode, find an available blank tab instead of creating new page
         let newPage: Page | null = null;
         let newTabId: string | null = null;
-        
+
         const browserConfig = this.configLoader.getBrowserConfig();
         if (browserConfig.cdpUrl) {
           // CDP mode: find an available blank tab
@@ -1424,7 +1810,7 @@ export class HybridBrowserSession {
               break;
             }
           }
-          
+
           if (!newPage || !newTabId) {
             console.log('[CDP] No available blank tabs, creating new page');
             newPage = await this.context.newPage();
@@ -1437,41 +1823,43 @@ export class HybridBrowserSession {
           newTabId = this.generateTabId();
           this.registerNewPage(newTabId, newPage);
         }
-        
+
         // Set up page properties
         newPage.setDefaultNavigationTimeout(browserConfig.navigationTimeout);
         newPage.setDefaultTimeout(browserConfig.navigationTimeout);
-        
+
         // Navigate to the URL
-        await newPage.goto(url, { 
+        await newPage.goto(url, {
           timeout: browserConfig.navigationTimeout,
           waitUntil: browserConfig.domContentLoadedState as any
         });
-        
+
         //  Automatically switch to the new tab
         this.currentTabId = newTabId;
         await newPage.bringToFront();
-        
+
         // Reset scroll position for the new page
         this.scrollPosition = { x: 0, y: 0 };
-        
+
         //  Mark that we've navigated
         this.hasNavigatedBefore = true;
-        
+
         const navigationTime = Date.now() - navigationStart;
         const stabilityResult = await this.waitForPageStability(newPage);
         const totalTime = Date.now() - startTime;
-        
+
         return {
           success: true,
           message: `Opened ${url} in new tab`,
-          newTabId: newTabId, //  Include the new tab ID
+          newTabId: newTabId,
           timing: {
             total_time_ms: totalTime,
             navigation_time_ms: navigationTime,
             dom_content_loaded_time_ms: stabilityResult.domContentLoadedTime,
             network_idle_time_ms: stabilityResult.networkIdleTime,
+            dom_stability_time_ms: stabilityResult.domStabilityTime,
           },
+          note: stabilityResult.note,
         };
       }
     } catch (error) {
@@ -1484,6 +1872,7 @@ export class HybridBrowserSession {
           navigation_time_ms: 0,
           dom_content_loaded_time_ms: 0,
           network_idle_time_ms: 0,
+          dom_stability_time_ms: 0,
         },
       };
     }
@@ -1493,20 +1882,20 @@ export class HybridBrowserSession {
     if (!this.pages.has(tabId)) {
       return false;
     }
-    
+
     const page = this.pages.get(tabId)!;
-    
+
     if (page.isClosed()) {
       this.pages.delete(tabId);
       return false;
     }
-    
+
     try {
       console.log(`Switching to tab ${tabId}`);
-      
+
       // Update internal state first
       this.currentTabId = tabId;
-      
+
       // Try to activate the tab using a gentler approach
       // Instead of bringToFront, we'll use a combination of methods
       try {
@@ -1517,7 +1906,7 @@ export class HybridBrowserSession {
           // Dispatch a focus event
           window.dispatchEvent(new Event('focus'));
         }).catch(() => {});
-        
+
         // Method 2: For non-headless mode, schedule bringToFront asynchronously
         // This prevents WebSocket disruption by not blocking the current operation
         if (!this.configLoader.getBrowserConfig().headless) {
@@ -1538,7 +1927,7 @@ export class HybridBrowserSession {
         // Log but don't fail - internal state is still updated
         console.warn(`Tab focus warning for ${tabId}:`, error);
       }
-      
+
       console.log(`Successfully switched to tab ${tabId}`);
       return true;
     } catch (error) {
@@ -1551,15 +1940,15 @@ export class HybridBrowserSession {
     if (!this.pages.has(tabId)) {
       return false;
     }
-    
+
     const page = this.pages.get(tabId)!;
-    
+
     if (!page.isClosed()) {
       await page.close();
     }
-    
+
     this.pages.delete(tabId);
-    
+
     if (tabId === this.currentTabId) {
       const remainingTabs = Array.from(this.pages.keys());
       if (remainingTabs.length > 0) {
@@ -1568,7 +1957,7 @@ export class HybridBrowserSession {
         this.currentTabId = null;
       }
     }
-    
+
     return true;
   }
 
@@ -1630,7 +2019,7 @@ export class HybridBrowserSession {
 
         try {
           const browserConfig = this.configLoader.getBrowserConfig();
-          await page.waitForLoadState(browserConfig.domContentLoadedState as any, { timeout: browserConfig.pageStabilityTimeout });
+          await page.waitForLoadState(browserConfig.domContentLoadedState as any, { timeout: browserConfig.domContentLoadedTimeout });
           stabilityResult.domContentLoadedTime = Date.now() - stabilityStart;
         } catch (error) {
         }
@@ -1694,15 +2083,15 @@ export class HybridBrowserSession {
   async takeScreenshot(): Promise<{ buffer: Buffer; timing: { screenshot_time_ms: number } }> {
     const startTime = Date.now();
     const page = await this.getCurrentPage();
-    
+
     const browserConfig = this.configLoader.getBrowserConfig();
-    const buffer = await page.screenshot({ 
+    const buffer = await page.screenshot({
       timeout: browserConfig.screenshotTimeout,
       fullPage: browserConfig.fullPageScreenshot
     });
-    
+
     const screenshotTime = Date.now() - startTime;
-    
+
     return {
       buffer,
       timing: {
@@ -1713,16 +2102,16 @@ export class HybridBrowserSession {
 
   async close(): Promise<void> {
     const browserConfig = this.configLoader.getBrowserConfig();
-    
+
     for (const page of this.pages.values()) {
       if (!page.isClosed()) {
         await page.close();
       }
     }
-    
+
     this.pages.clear();
     this.currentTabId = null;
-    
+
     // Handle context cleanup separately for CDP mode
     if (!browserConfig.cdpUrl && this.context && this.contextOwnedByUs) {
       // For non-CDP mode, close context here
@@ -1730,7 +2119,7 @@ export class HybridBrowserSession {
       this.context = null;
       this.contextOwnedByUs = false;
     }
-    
+
     if (this.browser) {
       if (browserConfig.cdpUrl) {
         // In CDP mode: tear down only our context, then disconnect
@@ -1747,69 +2136,4 @@ export class HybridBrowserSession {
       this.browser = null;
     }
   }
-
-  private filterElementsInViewport(
-    elements: Record<string, SnapshotElement>, 
-    viewport: { width: number, height: number }, 
-    scrollPos: { x: number, y: number }
-  ): Record<string, SnapshotElement> {
-    const filtered: Record<string, SnapshotElement> = {};
-    
-    
-    // Apply viewport filtering
-    // boundingBox() returns viewport-relative coordinates, so we don't need to add scroll offsets
-    const viewportLeft = 0;
-    const viewportTop = 0;
-    const viewportRight = viewport.width;
-    const viewportBottom = viewport.height;
-    
-    for (const [ref, element] of Object.entries(elements)) {
-      // If element has no coordinates, include it (fallback)
-      if (!element.coordinates) {
-        filtered[ref] = element;
-        continue;
-      }
-      
-      const { x, y, width, height } = element.coordinates;
-      
-      // Check if element is visible in current viewport
-      // Element is visible if it overlaps with viewport bounds
-      // Since boundingBox() coords are viewport-relative, we compare directly
-      const isVisible = (
-        x < viewportRight &&              // Left edge is before viewport right
-        y < viewportBottom &&             // Top edge is before viewport bottom  
-        x + width > viewportLeft &&       // Right edge is after viewport left
-        y + height > viewportTop          // Bottom edge is after viewport top
-      );
-      
-      if (isVisible) {
-        filtered[ref] = element;
-      }
-    }
-    
-    return filtered;
-  }
-
-  private rebuildSnapshotText(originalSnapshot: string, filteredElements: Record<string, SnapshotElement>): string {
-    const lines = originalSnapshot.split('\n');
-    const filteredLines: string[] = [];
-    
-    for (const line of lines) {
-      const refMatch = line.match(/\[ref=([^\]]+)\]/);
-      
-      if (refMatch) {
-        const ref = refMatch[1];
-        // Only include lines for elements that passed viewport filtering
-        if (filteredElements[ref]) {
-          filteredLines.push(line);
-        }
-      } else {
-        // Include non-element lines (headers, etc.)
-        filteredLines.push(line);
-      }
-    }
-    
-    return filteredLines.join('\n');
-  }
-
 }

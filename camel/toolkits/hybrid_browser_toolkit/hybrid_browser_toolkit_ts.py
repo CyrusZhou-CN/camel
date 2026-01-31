@@ -1,4 +1,4 @@
-# ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
+# ========= Copyright 2023-2026 @ CAMEL-AI.org. All Rights Reserved. =========
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -10,9 +10,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
+# ========= Copyright 2023-2026 @ CAMEL-AI.org. All Rights Reserved. =========
 # =========
 
+import asyncio
 import contextlib
 import time
 from typing import (
@@ -22,15 +23,15 @@ from typing import (
     Dict,
     List,
     Optional,
-    TypedDict,
     cast,
 )
 
+from typing_extensions import TypedDict
+
 from camel.logger import get_logger
-from camel.messages import BaseMessage
 from camel.toolkits.base import BaseToolkit, RegisteredAgentToolkit
 from camel.toolkits.function_tool import FunctionTool
-from camel.utils.commons import dependencies_required
+from camel.utils.tool_result import ToolResult
 
 from .config_loader import ConfigLoader
 from .ws_wrapper import WebSocketBrowserWrapper, high_level_action
@@ -303,6 +304,70 @@ class HybridBrowserToolkit(BaseToolkit, RegisteredAgentToolkit):
         """Get the cache directory."""
         return self._cache_dir
 
+    async def _build_action_response(
+        self,
+        result: Dict[str, Any],
+        ws_wrapper: Any,
+        include_note: bool = True,
+    ) -> Dict[str, Any]:
+        """Build a standardized action response with tab info.
+
+        Args:
+            result: The raw result from the WebSocket wrapper action.
+            ws_wrapper: The WebSocket wrapper instance for getting tab info.
+            include_note: Whether to include the note field in the response.
+
+        Returns:
+            A standardized response dictionary with:
+                - All fields from result
+                - tabs: Information about all open tabs
+                - current_tab: Index of the active tab
+                - total_tabs: Total number of open tabs
+                - note: Loading status note (if include_note and present)
+        """
+        tab_info = await ws_wrapper.get_tab_info()
+
+        response = {
+            **result,
+            "tabs": tab_info,
+            "current_tab": next(
+                (i for i, tab in enumerate(tab_info) if tab.get("is_current")),
+                0,
+            ),
+            "total_tabs": len(tab_info),
+        }
+
+        # Always include note field for consistency (empty if not present)
+        if include_note:
+            response["note"] = result.get("note", "")
+
+        return response
+
+    def _build_error_response(
+        self,
+        error_message: str,
+        include_note: bool = True,
+    ) -> Dict[str, Any]:
+        """Build a standardized error response.
+
+        Args:
+            error_message: The error message to include.
+            include_note: Whether to include the note field.
+
+        Returns:
+            A standardized error response dictionary.
+        """
+        response: Dict[str, Any] = {
+            "result": error_message,
+            "snapshot": "",
+            "tabs": [],
+            "current_tab": 0,
+            "total_tabs": 0,
+        }
+        if include_note:
+            response["note"] = ""
+        return response
+
     async def browser_open(self) -> Dict[str, Any]:
         r"""Starts a new browser session. This must be the first browser
         action.
@@ -318,37 +383,15 @@ class HybridBrowserToolkit(BaseToolkit, RegisteredAgentToolkit):
                 - "tabs" (List[Dict]): Information about all open tabs.
                 - "current_tab" (int): Index of the active tab.
                 - "total_tabs" (int): Total number of open tabs.
+                - "note" (str): A note about the loading status of the page.
         """
         try:
             ws_wrapper = await self._get_ws_wrapper()
             result = await ws_wrapper.open_browser(self._default_start_url)
-
-            tab_info = await ws_wrapper.get_tab_info()
-            result.update(
-                {
-                    "tabs": tab_info,
-                    "current_tab": next(
-                        (
-                            i
-                            for i, tab in enumerate(tab_info)
-                            if tab.get("is_current")
-                        ),
-                        0,
-                    ),
-                    "total_tabs": len(tab_info),
-                }
-            )
-
-            return result
+            return await self._build_action_response(result, ws_wrapper)
         except Exception as e:
             logger.error(f"Failed to open browser: {e}")
-            return {
-                "result": f"Error opening browser: {e}",
-                "snapshot": "",
-                "tabs": [],
-                "current_tab": 0,
-                "total_tabs": 0,
-            }
+            return self._build_error_response(f"Error opening browser: {e}")
 
     async def browser_close(self) -> str:
         r"""Closes the browser session, releasing all resources.
@@ -406,37 +449,15 @@ class HybridBrowserToolkit(BaseToolkit, RegisteredAgentToolkit):
                 - "tabs" (List[Dict]): Information about all open tabs.
                 - "current_tab" (int): Index of the new active tab.
                 - "total_tabs" (int): Total number of open tabs.
+                - "note" (str): A note about the loading status of the page.
         """
         try:
             ws_wrapper = await self._get_ws_wrapper()
             result = await ws_wrapper.visit_page(url)
-
-            tab_info = await ws_wrapper.get_tab_info()
-            result.update(
-                {
-                    "tabs": tab_info,
-                    "current_tab": next(
-                        (
-                            i
-                            for i, tab in enumerate(tab_info)
-                            if tab.get("is_current")
-                        ),
-                        0,
-                    ),
-                    "total_tabs": len(tab_info),
-                }
-            )
-
-            return result
+            return await self._build_action_response(result, ws_wrapper)
         except Exception as e:
             logger.error(f"Failed to visit page: {e}")
-            return {
-                "result": f"Error visiting page: {e}",
-                "snapshot": "",
-                "tabs": [],
-                "current_tab": 0,
-                "total_tabs": 0,
-            }
+            return self._build_error_response(f"Error visiting page: {e}")
 
     async def browser_back(self) -> Dict[str, Any]:
         r"""Goes back to the previous page in the browser history.
@@ -451,37 +472,15 @@ class HybridBrowserToolkit(BaseToolkit, RegisteredAgentToolkit):
                 - "tabs" (List[Dict]): Information about all open tabs.
                 - "current_tab" (int): Index of the active tab.
                 - "total_tabs" (int): Total number of open tabs.
+                - "note" (str): A note about the loading status of the page.
         """
         try:
             ws_wrapper = await self._get_ws_wrapper()
             result = await ws_wrapper.back()
-
-            tab_info = await ws_wrapper.get_tab_info()
-            result.update(
-                {
-                    "tabs": tab_info,
-                    "current_tab": next(
-                        (
-                            i
-                            for i, tab in enumerate(tab_info)
-                            if tab.get("is_current")
-                        ),
-                        0,
-                    ),
-                    "total_tabs": len(tab_info),
-                }
-            )
-
-            return result
+            return await self._build_action_response(result, ws_wrapper)
         except Exception as e:
             logger.error(f"Failed to navigate back: {e}")
-            return {
-                "result": f"Error navigating back: {e}",
-                "snapshot": "",
-                "tabs": [],
-                "current_tab": 0,
-                "total_tabs": 0,
-            }
+            return self._build_error_response(f"Error navigating back: {e}")
 
     async def browser_forward(self) -> Dict[str, Any]:
         r"""Goes forward to the next page in the browser history.
@@ -496,37 +495,15 @@ class HybridBrowserToolkit(BaseToolkit, RegisteredAgentToolkit):
                 - "tabs" (List[Dict]): Information about all open tabs.
                 - "current_tab" (int): Index of the active tab.
                 - "total_tabs" (int): Total number of open tabs.
+                - "note" (str): A note about the loading status of the page.
         """
         try:
             ws_wrapper = await self._get_ws_wrapper()
             result = await ws_wrapper.forward()
-
-            tab_info = await ws_wrapper.get_tab_info()
-            result.update(
-                {
-                    "tabs": tab_info,
-                    "current_tab": next(
-                        (
-                            i
-                            for i, tab in enumerate(tab_info)
-                            if tab.get("is_current")
-                        ),
-                        0,
-                    ),
-                    "total_tabs": len(tab_info),
-                }
-            )
-
-            return result
+            return await self._build_action_response(result, ws_wrapper)
         except Exception as e:
             logger.error(f"Failed to navigate forward: {e}")
-            return {
-                "result": f"Error navigating forward: {e}",
-                "snapshot": "",
-                "tabs": [],
-                "current_tab": 0,
-                "total_tabs": 0,
-            }
+            return self._build_error_response(f"Error navigating forward: {e}")
 
     async def browser_get_page_snapshot(self) -> str:
         r"""Gets a textual snapshot of the page's interactive elements.
@@ -554,12 +531,10 @@ class HybridBrowserToolkit(BaseToolkit, RegisteredAgentToolkit):
             logger.error(f"Failed to get page snapshot: {e}")
             return f"Error capturing snapshot: {e}"
 
-    @dependencies_required('PIL')
     async def browser_get_som_screenshot(
         self,
         read_image: bool = True,
-        instruction: Optional[str] = None,
-    ) -> str:
+    ) -> "str | ToolResult":
         r"""Captures a screenshot with interactive elements highlighted.
 
         "SoM" stands for "Set of Marks". This tool takes a screenshot and
@@ -569,17 +544,17 @@ class HybridBrowserToolkit(BaseToolkit, RegisteredAgentToolkit):
         textual snapshot is not enough.
 
         Args:
-            read_image (bool, optional): If `True`, the agent will analyze
-                the screenshot. Requires agent to be registered.
+            read_image (bool, optional): If `True`, the screenshot image will
+                be included in the agent's context for direct visual analysis.
+                If `False`, only a text message (including the saved file
+                path) will be returned.
                 (default: :obj:`True`)
-            instruction (Optional[str], optional): A specific question or
-                command for the agent regarding the screenshot, used only if
-                `read_image` is `True`. For example: "Find the login button."
 
         Returns:
-            str: A confirmation message indicating the screenshot was
-                captured, the file path where it was saved, and optionally the
-                agent's analysis if `read_image` is `True`.
+            str | ToolResult: If `read_image` is `True`, returns a ToolResult
+                containing the text message and the screenshot image (which
+                will be automatically added to agent's context). If `False`,
+                returns a string with the file path only.
         """
         import base64
         import datetime
@@ -631,38 +606,19 @@ class HybridBrowserToolkit(BaseToolkit, RegisteredAgentToolkit):
                         result_text += f" (saved to: {file_path})"
                         break
 
-            if read_image and file_path:
-                if self.agent is None:
-                    logger.error(
-                        "Cannot analyze screenshot: No agent registered. "
-                        "Please pass this toolkit to ChatAgent via "
-                        "toolkits_to_register_agent parameter."
-                    )
-                    result_text += (
-                        " Error: No agent registered for image analysis. "
-                        "Please pass this toolkit to ChatAgent via "
-                        "toolkits_to_register_agent parameter."
-                    )
-                else:
-                    try:
-                        from PIL import Image
-
-                        img = Image.open(file_path)
-                        inst = instruction if instruction is not None else ""
-                        message = BaseMessage.make_user_message(
-                            role_name="User",
-                            content=inst,
-                            image_list=[img],
-                        )
-
-                        response = await self.agent.astep(message)
-                        agent_response = response.msgs[0].content
-                        result_text += f". Agent analysis: {agent_response}"
-                    except Exception as e:
-                        logger.error(f"Error analyzing screenshot: {e}")
-                        result_text += f". Error analyzing screenshot: {e}"
-
-            return result_text
+            # Return ToolResult with image if read_image is True
+            if read_image and result.images:
+                logger.info(
+                    f"Returning ToolResult with {len(result.images)} image(s) "
+                    "for agent context"
+                )
+                return ToolResult(
+                    text=result_text,
+                    images=result.images,  # Base64 images from WebSocket
+                )
+            else:
+                # Return plain text if read_image is False
+                return result_text
         except Exception as e:
             logger.error(f"Failed to get screenshot: {e}")
             return f"Error capturing screenshot: {e}"
@@ -683,44 +639,16 @@ class HybridBrowserToolkit(BaseToolkit, RegisteredAgentToolkit):
                 - "tabs" (List[Dict]): Information about all open tabs.
                 - "current_tab" (int): Index of the active tab.
                 - "total_tabs" (int): Total number of open tabs.
+                - "note" (str): A note about the loading status of the page.
+                - "timing" (Dict): Timing information for the action.
         """
         try:
             ws_wrapper = await self._get_ws_wrapper()
             result = await ws_wrapper.click(ref)
-
-            tab_info = await ws_wrapper.get_tab_info()
-
-            response = {
-                "result": result.get("result", ""),
-                "snapshot": result.get("snapshot", ""),
-                "tabs": tab_info,
-                "current_tab": next(
-                    (
-                        i
-                        for i, tab in enumerate(tab_info)
-                        if tab.get("is_current")
-                    ),
-                    0,
-                ),
-                "total_tabs": len(tab_info),
-            }
-
-            if "newTabId" in result:
-                response["newTabId"] = result["newTabId"]
-
-            if "timing" in result:
-                response["timing"] = result["timing"]
-
-            return response
+            return await self._build_action_response(result, ws_wrapper)
         except Exception as e:
             logger.error(f"Failed to click element: {e}")
-            return {
-                "result": f"Error clicking element: {e}",
-                "snapshot": "",
-                "tabs": [],
-                "current_tab": 0,
-                "total_tabs": 0,
-            }
+            return self._build_error_response(f"Error clicking element: {e}")
 
     async def browser_type(
         self,
@@ -756,6 +684,7 @@ class HybridBrowserToolkit(BaseToolkit, RegisteredAgentToolkit):
                 - "total_tabs" (int): Total number of open tabs.
                 - "details" (Dict[str, Any]): When using multiple inputs,
                   contains success/error status for each ref.
+                - "note" (str): A note about the loading status of the page.
         """
         try:
             ws_wrapper = await self._get_ws_wrapper()
@@ -770,32 +699,10 @@ class HybridBrowserToolkit(BaseToolkit, RegisteredAgentToolkit):
                     "or 'inputs' for multiple inputs"
                 )
 
-            tab_info = await ws_wrapper.get_tab_info()
-            result.update(
-                {
-                    "tabs": tab_info,
-                    "current_tab": next(
-                        (
-                            i
-                            for i, tab in enumerate(tab_info)
-                            if tab.get("is_current")
-                        ),
-                        0,
-                    ),
-                    "total_tabs": len(tab_info),
-                }
-            )
-
-            return result
+            return await self._build_action_response(result, ws_wrapper)
         except Exception as e:
             logger.error(f"Failed to type text: {e}")
-            return {
-                "result": f"Error typing text: {e}",
-                "snapshot": "",
-                "tabs": [],
-                "current_tab": 0,
-                "total_tabs": 0,
-            }
+            return self._build_error_response(f"Error typing text: {e}")
 
     async def browser_select(self, *, ref: str, value: str) -> Dict[str, Any]:
         r"""Selects an option in a dropdown (`<select>`) element.
@@ -813,37 +720,15 @@ class HybridBrowserToolkit(BaseToolkit, RegisteredAgentToolkit):
                 - "tabs" (List[Dict]): Information about all open tabs.
                 - "current_tab" (int): Index of the active tab.
                 - "total_tabs" (int): Total number of open tabs.
+                - "note" (str): A note about the loading status of the page.
         """
         try:
             ws_wrapper = await self._get_ws_wrapper()
             result = await ws_wrapper.select(ref, value)
-
-            tab_info = await ws_wrapper.get_tab_info()
-            result.update(
-                {
-                    "tabs": tab_info,
-                    "current_tab": next(
-                        (
-                            i
-                            for i, tab in enumerate(tab_info)
-                            if tab.get("is_current")
-                        ),
-                        0,
-                    ),
-                    "total_tabs": len(tab_info),
-                }
-            )
-
-            return result
+            return await self._build_action_response(result, ws_wrapper)
         except Exception as e:
             logger.error(f"Failed to select option: {e}")
-            return {
-                "result": f"Error selecting option: {e}",
-                "snapshot": "",
-                "tabs": [],
-                "current_tab": 0,
-                "total_tabs": 0,
-            }
+            return self._build_error_response(f"Error selecting option: {e}")
 
     async def browser_scroll(
         self, *, direction: str, amount: int = 500
@@ -861,37 +746,15 @@ class HybridBrowserToolkit(BaseToolkit, RegisteredAgentToolkit):
                 - "tabs" (List[Dict]): Information about all open tabs.
                 - "current_tab" (int): Index of the active tab.
                 - "total_tabs" (int): Total number of open tabs.
+                - "note" (str): A note about the loading status of the page.
         """
         try:
             ws_wrapper = await self._get_ws_wrapper()
             result = await ws_wrapper.scroll(direction, amount)
-
-            tab_info = await ws_wrapper.get_tab_info()
-            result.update(
-                {
-                    "tabs": tab_info,
-                    "current_tab": next(
-                        (
-                            i
-                            for i, tab in enumerate(tab_info)
-                            if tab.get("is_current")
-                        ),
-                        0,
-                    ),
-                    "total_tabs": len(tab_info),
-                }
-            )
-
-            return result
+            return await self._build_action_response(result, ws_wrapper)
         except Exception as e:
             logger.error(f"Failed to scroll: {e}")
-            return {
-                "result": f"Error scrolling: {e}",
-                "snapshot": "",
-                "tabs": [],
-                "current_tab": 0,
-                "total_tabs": 0,
-            }
+            return self._build_error_response(f"Error scrolling: {e}")
 
     async def browser_enter(self) -> Dict[str, Any]:
         r"""Simulates pressing the Enter key on the currently focused
@@ -908,37 +771,15 @@ class HybridBrowserToolkit(BaseToolkit, RegisteredAgentToolkit):
                 - "tabs" (List[Dict]): Information about all open tabs.
                 - "current_tab" (int): Index of the active tab.
                 - "total_tabs" (int): Total number of open tabs.
+                - "note" (str): A note about the loading status of the page.
         """
         try:
             ws_wrapper = await self._get_ws_wrapper()
             result = await ws_wrapper.enter()
-
-            tab_info = await ws_wrapper.get_tab_info()
-            result.update(
-                {
-                    "tabs": tab_info,
-                    "current_tab": next(
-                        (
-                            i
-                            for i, tab in enumerate(tab_info)
-                            if tab.get("is_current")
-                        ),
-                        0,
-                    ),
-                    "total_tabs": len(tab_info),
-                }
-            )
-
-            return result
+            return await self._build_action_response(result, ws_wrapper)
         except Exception as e:
             logger.error(f"Failed to press enter: {e}")
-            return {
-                "result": f"Error pressing enter: {e}",
-                "snapshot": "",
-                "tabs": [],
-                "current_tab": 0,
-                "total_tabs": 0,
-            }
+            return self._build_error_response(f"Error pressing enter: {e}")
 
     async def browser_mouse_control(
         self, *, control: str, x: float, y: float
@@ -959,37 +800,15 @@ class HybridBrowserToolkit(BaseToolkit, RegisteredAgentToolkit):
                 - "tabs" (List[Dict]): Information about all open tabs.
                 - "current_tab" (int): Index of the active tab.
                 - "total_tabs" (int): Total number of open tabs.
+                - "note" (str): A note about the loading status of the page.
         """
         try:
             ws_wrapper = await self._get_ws_wrapper()
             result = await ws_wrapper.mouse_control(control, x, y)
-
-            tab_info = await ws_wrapper.get_tab_info()
-            result.update(
-                {
-                    "tabs": tab_info,
-                    "current_tab": next(
-                        (
-                            i
-                            for i, tab in enumerate(tab_info)
-                            if tab.get("is_current")
-                        ),
-                        0,
-                    ),
-                    "total_tabs": len(tab_info),
-                }
-            )
-
-            return result
+            return await self._build_action_response(result, ws_wrapper)
         except Exception as e:
             logger.error(f"Failed to control mouse: {e}")
-            return {
-                "result": f"Error with mouse control: {e}",
-                "snapshot": "",
-                "tabs": [],
-                "current_tab": 0,
-                "total_tabs": 0,
-            }
+            return self._build_error_response(f"Error with mouse control: {e}")
 
     async def browser_mouse_drag(
         self, *, from_ref: str, to_ref: str
@@ -1007,37 +826,17 @@ class HybridBrowserToolkit(BaseToolkit, RegisteredAgentToolkit):
                 - "tabs" (List[Dict]): Information about all open tabs.
                 - "current_tab" (int): Index of the active tab.
                 - "total_tabs" (int): Total number of open tabs.
+                - "note" (str): A note about the loading status of the page.
         """
         try:
             ws_wrapper = await self._get_ws_wrapper()
             result = await ws_wrapper.mouse_drag(from_ref, to_ref)
-
-            tab_info = await ws_wrapper.get_tab_info()
-            result.update(
-                {
-                    "tabs": tab_info,
-                    "current_tab": next(
-                        (
-                            i
-                            for i, tab in enumerate(tab_info)
-                            if tab.get("is_current")
-                        ),
-                        0,
-                    ),
-                    "total_tabs": len(tab_info),
-                }
-            )
-
-            return result
+            return await self._build_action_response(result, ws_wrapper)
         except Exception as e:
             logger.error(f"Error with mouse drag and drop: {e}")
-            return {
-                "result": f"Error with mouse drag and drop: {e}",
-                "snapshot": "",
-                "tabs": [],
-                "current_tab": 0,
-                "total_tabs": 0,
-            }
+            return self._build_error_response(
+                f"Error with mouse drag and drop: {e}"
+            )
 
     async def browser_press_key(self, *, keys: List[str]) -> Dict[str, Any]:
         r"""Press key and key combinations.
@@ -1055,37 +854,15 @@ class HybridBrowserToolkit(BaseToolkit, RegisteredAgentToolkit):
                 - "tabs" (List[Dict]): Information about all open tabs.
                 - "current_tab" (int): Index of the active tab.
                 - "total_tabs" (int): Total number of open tabs.
+                - "note" (str): A note about the loading status of the page.
         """
         try:
             ws_wrapper = await self._get_ws_wrapper()
             result = await ws_wrapper.press_key(keys)
-
-            tab_info = await ws_wrapper.get_tab_info()
-            result.update(
-                {
-                    "tabs": tab_info,
-                    "current_tab": next(
-                        (
-                            i
-                            for i, tab in enumerate(tab_info)
-                            if tab.get("is_current")
-                        ),
-                        0,
-                    ),
-                    "total_tabs": len(tab_info),
-                }
-            )
-
-            return result
+            return await self._build_action_response(result, ws_wrapper)
         except Exception as e:
             logger.error(f"Failed to press key: {e}")
-            return {
-                "result": f"Error with press key: {e}",
-                "snapshot": "",
-                "tabs": [],
-                "current_tab": 0,
-                "total_tabs": 0,
-            }
+            return self._build_error_response(f"Error with press key: {e}")
 
     async def browser_switch_tab(self, *, tab_id: str) -> Dict[str, Any]:
         r"""Switches to a different browser tab using its ID.
@@ -1103,37 +880,15 @@ class HybridBrowserToolkit(BaseToolkit, RegisteredAgentToolkit):
                 - "tabs" (List[Dict]): Information about all open tabs.
                 - "current_tab" (int): Index of the new active tab.
                 - "total_tabs" (int): Total number of open tabs.
+                - "note" (str): A note about the loading status of the page.
         """
         try:
             ws_wrapper = await self._get_ws_wrapper()
             result = await ws_wrapper.switch_tab(tab_id)
-
-            tab_info = await ws_wrapper.get_tab_info()
-            result.update(
-                {
-                    "tabs": tab_info,
-                    "current_tab": next(
-                        (
-                            i
-                            for i, tab in enumerate(tab_info)
-                            if tab.get("is_current")
-                        ),
-                        0,
-                    ),
-                    "total_tabs": len(tab_info),
-                }
-            )
-
-            return result
+            return await self._build_action_response(result, ws_wrapper)
         except Exception as e:
             logger.error(f"Failed to switch tab: {e}")
-            return {
-                "result": f"Error switching tab: {e}",
-                "snapshot": "",
-                "tabs": [],
-                "current_tab": 0,
-                "total_tabs": 0,
-            }
+            return self._build_error_response(f"Error switching tab: {e}")
 
     async def browser_close_tab(self, *, tab_id: str) -> Dict[str, Any]:
         r"""Closes a browser tab using its ID.
@@ -1152,37 +907,15 @@ class HybridBrowserToolkit(BaseToolkit, RegisteredAgentToolkit):
                 - "tabs" (List[Dict]): Information about remaining tabs.
                 - "current_tab" (int): Index of the new active tab.
                 - "total_tabs" (int): Total number of remaining tabs.
+                - "note" (str): A note about the loading status of the page.
         """
         try:
             ws_wrapper = await self._get_ws_wrapper()
             result = await ws_wrapper.close_tab(tab_id)
-
-            tab_info = await ws_wrapper.get_tab_info()
-            result.update(
-                {
-                    "tabs": tab_info,
-                    "current_tab": next(
-                        (
-                            i
-                            for i, tab in enumerate(tab_info)
-                            if tab.get("is_current")
-                        ),
-                        0,
-                    ),
-                    "total_tabs": len(tab_info),
-                }
-            )
-
-            return result
+            return await self._build_action_response(result, ws_wrapper)
         except Exception as e:
             logger.error(f"Failed to close tab: {e}")
-            return {
-                "result": f"Error closing tab: {e}",
-                "snapshot": "",
-                "tabs": [],
-                "current_tab": 0,
-                "total_tabs": 0,
-            }
+            return self._build_error_response(f"Error closing tab: {e}")
 
     async def browser_get_tab_info(self) -> Dict[str, Any]:
         r"""Gets a list of all open browser tabs and their information.
@@ -1390,85 +1123,91 @@ class HybridBrowserToolkit(BaseToolkit, RegisteredAgentToolkit):
         ws_wrapper: Any,
         system: str,
     ) -> Dict[str, Any]:
-        r"""Input to sheet using batch keyboard input with relative
-        positioning.
+        r"""Input to sheet using batch keyboard input with absolute positioning
+        via Name Box (Cmd+J).
 
-        Builds all operations and sends them in ONE command to TypeScript,
-        which executes them and only waits for stability once at the end.
+        This is more robust than relative navigation (arrow keys) because it
+        handles hidden rows/columns and merged cells correctly.
         """
         operations: List[Dict[str, Any]] = []
 
-        # Go to A1 to ensure we start from a known position
-        if system == "Darwin":
-            operations.append({"type": "press", "keys": ["Meta", "Home"]})
-        else:
-            operations.append({"type": "press", "keys": ["Control", "Home"]})
-        operations.append({"type": "wait", "delay": 310})
-
-        # Start at (0, 0)
-        current_row = 0
-        current_col = 0
+        def col_to_letter(col_idx: int) -> str:
+            """Convert 0-based column index to letter (0->A, 25->Z, 26->AA)."""
+            result = ""
+            col_idx += 1  # Convert to 1-based for calculation
+            while col_idx > 0:
+                col_idx, remainder = divmod(col_idx - 1, 26)
+                result = chr(65 + remainder) + result
+            return result
 
         for cell in cells:
             target_row = cell.get("row", 0)
             target_col = cell.get("col", 0)
             text = cell.get("text", "")
 
-            # Calculate relative movement needed
-            row_diff = target_row - current_row
-            col_diff = target_col - current_col
+            # Convert to A1 notation
+            col_letter = col_to_letter(target_col)
+            row_number = target_row + 1
+            cell_address = f"{col_letter}{row_number}"
 
-            # Navigate vertically
-            if row_diff > 0:
-                for _ in range(row_diff):
-                    operations.append({"type": "press", "keys": ["ArrowDown"]})
-                    operations.append({"type": "wait", "delay": 50})
-            elif row_diff < 0:
-                for _ in range(abs(row_diff)):
-                    operations.append({"type": "press", "keys": ["ArrowUp"]})
-                    operations.append({"type": "wait", "delay": 50})
+            # 1. Focus Name Box
+            if system == "Darwin":
+                operations.append({"type": "press", "keys": ["Meta", "j"]})
+            else:
+                # On Windows/Linux, it's usually Ctrl+J or Alt+D
+                # The snapshot showed Cmd+J for Mac.
+                # Standard Google Sheets shortcut for
+                # "Go to range" is F5 or Ctrl+J
+                operations.append({"type": "press", "keys": ["Control", "j"]})
 
-            # Navigate horizontally
-            if col_diff > 0:
-                for _ in range(col_diff):
-                    operations.append(
-                        {"type": "press", "keys": ["ArrowRight"]}
-                    )
-                    operations.append({"type": "wait", "delay": 50})
-            elif col_diff < 0:
-                for _ in range(abs(col_diff)):
-                    operations.append({"type": "press", "keys": ["ArrowLeft"]})
-                    operations.append({"type": "wait", "delay": 50})
+            operations.append({"type": "wait", "delay": 500})
 
-            # Wait after navigation if moved
-            if row_diff != 0 or col_diff != 0:
-                operations.append({"type": "wait", "delay": 100})
+            # 2. Type Address
+            operations.append(
+                {"type": "type", "text": cell_address, "delay": 0}
+            )
+            operations.append({"type": "wait", "delay": 200})
+            operations.append({"type": "press", "keys": ["Enter"]})
+            operations.append({"type": "wait", "delay": 500})
 
-            # Clear and input
+            # 3. Clear content (Delete/Backspace)
+            # Just in case, press Delete to clear existing content
             operations.append({"type": "press", "keys": ["Delete"]})
-            operations.append({"type": "wait", "delay": 120})
+            operations.append({"type": "wait", "delay": 100})
 
+            # 4. Type Text
             if text:
                 operations.append({"type": "type", "text": text, "delay": 0})
-                operations.append({"type": "wait", "delay": 120})
+                operations.append({"type": "wait", "delay": 200})
+                # Press Enter to confirm input
+                operations.append({"type": "press", "keys": ["Enter"]})
+                operations.append({"type": "wait", "delay": 300})
 
-            # Press Enter to confirm
-            operations.append({"type": "press", "keys": ["Enter"]})
-            operations.append({"type": "wait", "delay": 130})
-
-            # Update current position (after Enter, cursor moves to next row)
-            current_row = target_row + 1
-            current_col = target_col
+        # Chunk operations to avoid 100-op limit in TypeScript backend
+        # Each cell update takes ~10 ops, so 100 ops is only ~10 cells.
+        # We split into chunks of 50 ops to be safe.
+        CHUNK_SIZE = 50
 
         try:
-            await ws_wrapper._send_command(
-                'batch_keyboard_input',
-                {'operations': operations, 'skipStabilityWait': True},
-            )
+            for i in range(0, len(operations), CHUNK_SIZE):
+                chunk = operations[i : i + CHUNK_SIZE]
+                await ws_wrapper._send_command(
+                    'batch_keyboard_input',
+                    {'operations': chunk, 'skipStabilityWait': True},
+                )
+                # Small delay between chunks
+                await asyncio.sleep(0.2)
+
+            # Wait a bit for the last input to settle
+            await asyncio.sleep(1.0)
+
             tab_info = await ws_wrapper.get_tab_info()
 
             return {
-                "result": f"Successfully input to {len(cells)} cells",
+                "result": (
+                    f"Successfully input to {len(cells)} cells "
+                    "using absolute navigation"
+                ),
                 "snapshot": "",
                 "tabs": tab_info,
                 "current_tab": next(

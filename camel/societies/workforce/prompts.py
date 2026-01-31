@@ -1,4 +1,4 @@
-# ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
+# ========= Copyright 2023-2026 @ CAMEL-AI.org. All Rights Reserved. =========
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -10,7 +10,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
+# ========= Copyright 2023-2026 @ CAMEL-AI.org. All Rights Reserved. =========
 from camel.prompts import TextPrompt
 
 # ruff: noqa: E501
@@ -57,7 +57,7 @@ Your response MUST be a valid JSON object containing an 'assignments' field with
 
 Each assignment dictionary should have:
 - "task_id": the ID of the task
-- "assignee_id": the ID of the chosen worker node  
+- "assignee_id": the ID of the chosen worker node
 - "dependencies": list of task IDs that this task depends on (empty list if no dependencies)
 
 Example valid response:
@@ -321,6 +321,7 @@ First, assess whether the task was completed successfully and meets quality stan
 - Focus on analyzing the error cause
 
 **For Quality Issues (task completed but needs evaluation):**
+CRITICAL: EVALUATE OBJECTIVELY WITHOUT ASSUMPTIONS, Judge whether the task was executed properly
 Evaluate the task result based on these criteria:
 1. **Completeness**: Does the result fully address all task requirements?
 2. **Accuracy**: Is the result correct and well-structured?
@@ -333,67 +334,21 @@ Provide:
 
 **STEP 2: DETERMINE RECOVERY STRATEGY (if quality insufficient)**
 
-If the task quality is insufficient, select the best recovery strategy:
+If the task quality is insufficient, select the best recovery strategy from the ENABLED strategies below:
 
-**Available Strategies:**
-
-1. **retry** - Retry with the same worker and task content
-   - **Best for**:
-     * Network errors, connection timeouts, temporary API issues
-     * Random failures that are likely temporary
-     * Minor quality issues that may resolve on retry
-   - **Not suitable for**:
-     * Fundamental task misunderstandings
-     * Worker capability gaps
-     * Persistent quality problems
-
-2. **reassign** - Assign to a different worker
-   - **Best for**:
-     * Current worker lacks required skills/expertise
-     * Worker-specific quality issues
-     * Task requires different specialization
-   - **Not suitable for**:
-     * Task description is unclear (use replan instead)
-     * Task is too complex (use decompose instead)
-   - **Note**: Only available for quality issues, not failures
-
-3. **replan** - Modify task content with clearer instructions
-   - **Best for**:
-     * Unclear or ambiguous requirements
-     * Missing context or information
-     * Task description needs improvement
-   - **Requirements**:
-     * Provide modified_task_content with enhanced, clear instructions
-     * Modified task must be actionable for an AI agent
-     * Address the root cause identified in issues
-
-4. **decompose** - Break into smaller, manageable subtasks
-   - **Best for**:
-     * Task is too complex for a single worker
-     * Multiple distinct sub-problems exist
-     * Persistent failures despite retries
-     * Capability mismatches that need specialization
-   - **Consider**:
-     * Task depth (avoid if depth > 2)
-     * Whether subtasks can run in parallel
-
-5. **create_worker** - Create new specialized worker
-   - **Best for**:
-     * No existing worker has required capabilities
-     * Need specialized skills not currently available
-   - **Consider**:
-     * Whether decomposition could work instead
-     * Cost of creating new worker vs alternatives
-   - **Note**: Only available for task failures, not quality issues
+{available_strategies}
 
 **DECISION GUIDELINES:**
 
-**Priority Rules:**
-1. Connection/Network Errors → **retry** (almost always)
-2. Deep Tasks (depth > 2) → Avoid decompose, prefer **retry** or **replan**
-3. Worker Skill Mismatch → **reassign** (quality) or **decompose** (failure)
-4. Unclear Requirements → **replan** with specifics
-5. Task Too Complex → **decompose** into subtasks
+**IMPORTANT: You MUST ONLY select from the ENABLED strategies listed above.**
+If a strategy is not in the ENABLED list, you CANNOT use it regardless of the guidelines below.
+
+**Priority Rules (apply ONLY if the strategy is ENABLED):**
+1. Connection/Network Errors → prefer **retry** if enabled
+2. Deep Tasks (depth > 2) → Avoid decompose, prefer **retry** or **replan** if enabled
+3. Worker Skill Mismatch → prefer **reassign** (quality) or **decompose** (failure) if enabled, otherwise use **replan**
+4. Unclear Requirements → prefer **replan** with specifics if enabled
+5. Task Too Complex → prefer **decompose** into subtasks if enabled, otherwise use **replan**
 
 **RESPONSE FORMAT:**
 {response_format}
@@ -403,25 +358,72 @@ If the task quality is insufficient, select the best recovery strategy:
 - No explanations or text outside the JSON structure
 - Ensure all required fields are included
 - Use null for optional fields when not applicable
+- **MANDATORY: The recovery_strategy MUST be one of the ENABLED strategies listed above. Using a disabled strategy will cause an error.**
 """
 )
 
 FAILURE_ANALYSIS_RESPONSE_FORMAT = """JSON format:
-{
+{{
   "reasoning": "explanation (1-2 sentences)",
-  "recovery_strategy": "retry|replan|decompose|create_worker",
+  "recovery_strategy": "{strategy_options}",
   "modified_task_content": "new content if replan, else null",
   "issues": ["error1", "error2"]
-}"""
+}}"""
 
 QUALITY_EVALUATION_RESPONSE_FORMAT = """JSON format:
-{
+{{
   "quality_score": 0-100,
-  "reasoning": "explanation (1-2 sentences)", 
+  "reasoning": "explanation (1-2 sentences)",
   "issues": ["issue1", "issue2"],
-  "recovery_strategy": "retry|reassign|replan|decompose or null",
+  "recovery_strategy": "{strategy_options} or null",
   "modified_task_content": "new content if replan, else null"
-}"""
+}}"""
+
+# Strategy descriptions for dynamic prompt generation
+STRATEGY_DESCRIPTIONS = {
+    "retry": """**retry** - Retry with the same worker and task content
+   - **Best for**:
+     * Network errors, connection timeouts, temporary API issues
+     * Random failures that are likely temporary
+     * Minor quality issues that may resolve on retry
+   - **Not suitable for**:
+     * Fundamental task misunderstandings
+     * Worker capability gaps
+     * Persistent quality problems""",
+    "reassign": """**reassign** - Assign to a different worker
+   - **Best for**:
+     * Current worker lacks required skills/expertise
+     * Worker-specific issues or errors
+     * Task requires different specialization
+   - **Not suitable for**:
+     * Task description is unclear (use replan instead)
+     * Task is too complex (use decompose instead)""",
+    "replan": """**replan** - Modify task content with clearer instructions
+   - **Best for**:
+     * Unclear or ambiguous requirements
+     * Missing context or information
+     * Task description needs improvement
+   - **Requirements**:
+     * Provide modified_task_content with enhanced, clear instructions
+     * Modified task must be actionable for an AI agent
+     * Address the root cause identified in issues""",
+    "decompose": """**decompose** - Break into smaller, manageable subtasks
+   - **Best for**:
+     * Task is too complex for a single worker
+     * Multiple distinct sub-problems exist
+     * Persistent failures despite retries
+     * Capability mismatches that need specialization
+   - **Consider**:
+     * Task depth (avoid if depth > 2)
+     * Whether subtasks can run in parallel""",
+    "create_worker": """**create_worker** - Create new specialized worker
+   - **Best for**:
+     * No existing worker has required capabilities
+     * Need specialized skills not currently available
+   - **Consider**:
+     * Whether decomposition could work instead
+     * Cost of creating new worker vs alternatives""",
+}
 
 TASK_AGENT_SYSTEM_MESSAGE = """You are an intelligent task management assistant responsible for planning, analyzing, and quality control.
 
