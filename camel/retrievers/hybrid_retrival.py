@@ -11,11 +11,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ========= Copyright 2023-2026 @ CAMEL-AI.org. All Rights Reserved. =========
-from typing import Any, Collection, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Union
 
 from camel.embeddings import BaseEmbedding
 from camel.retrievers import BaseRetriever, BM25Retriever, VectorRetriever
 from camel.storages import BaseVectorStorage
+from camel.utils import dependencies_required
 
 
 class HybridRetriever(BaseRetriever):
@@ -54,6 +55,7 @@ class HybridRetriever(BaseRetriever):
         self.vr.process(content=self.content_input_path)
         self.bm25.process(content_input_path=self.content_input_path)
 
+    @dependencies_required('numpy')
     def _sort_rrf_scores(
         self,
         vector_retriever_results: List[Dict[str, Any]],
@@ -161,10 +163,7 @@ class HybridRetriever(BaseRetriever):
         vector_retriever_similarity_threshold: float = 0.5,
         bm25_retriever_top_k: int = 50,
         return_detailed_info: bool = False,
-    ) -> Union[
-        dict[str, Sequence[Collection[str]]],
-        dict[str, Sequence[Union[str, float]]],
-    ]:
+    ) -> Dict[str, Any]:
         r"""Executes a hybrid retrieval query using both vector and BM25
         retrievers.
 

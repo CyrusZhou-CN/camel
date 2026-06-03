@@ -11,10 +11,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ========= Copyright 2023-2026 @ CAMEL-AI.org. All Rights Reserved. =========
-from .base import BaseToolAgent
-from .hugging_face_tool_agent import HuggingFaceToolAgent
+
+from .base import BaseCache, CacheRecord
+from .semantic_cache import SemanticCache
 
 __all__ = [
-    'BaseToolAgent',
-    'HuggingFaceToolAgent',
+    "BaseCache",
+    "CacheRecord",
+    "SemanticCache",
 ]
