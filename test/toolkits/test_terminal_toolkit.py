@@ -11,14 +11,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ========= Copyright 2023-2026 @ CAMEL-AI.org. All Rights Reserved. =========
+import io
 import platform
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from camel.toolkits import TerminalToolkit
 from camel.toolkits.terminal_toolkit import DANGEROUS_COMMANDS
+from camel.toolkits.terminal_toolkit import (
+    terminal_toolkit as terminal_toolkit_module,
+)
 from camel.toolkits.terminal_toolkit.utils import sanitize_command
 
 
@@ -42,6 +48,54 @@ def test_file(temp_dir):
     content = "Hello\nWorld\nTest\nContent"
     file_path.write_text(content)
     return file_path
+
+
+@pytest.fixture
+def docker_toolkit():
+    toolkit = object.__new__(TerminalToolkit)
+    toolkit.use_docker_backend = True
+    toolkit.container = SimpleNamespace(id="container-id")
+    toolkit.docker_api_client = Mock()
+    return toolkit
+
+
+def test_docker_exec_skips_inspect_when_exit_code_is_not_checked(
+    docker_toolkit,
+):
+    docker_toolkit.docker_api_client.exec_create.return_value = {
+        "Id": "exec-id"
+    }
+    docker_toolkit.docker_api_client.exec_start.return_value = b"output"
+
+    exit_code, output = docker_toolkit._docker_exec(
+        "mkdir -p /workspace", check_exit_code=False
+    )
+
+    assert exit_code is None
+    assert output == b"output"
+    docker_toolkit.docker_api_client.exec_inspect.assert_not_called()
+
+
+def test_docker_exec_api_error_does_not_expose_command(
+    docker_toolkit, monkeypatch
+):
+    class FakeAPIError(Exception):
+        pass
+
+    monkeypatch.setattr(terminal_toolkit_module, "APIError", FakeAPIError)
+    monkeypatch.setattr(terminal_toolkit_module, "NotFound", FakeAPIError)
+    docker_toolkit.docker_api_client.exec_create.side_effect = FakeAPIError(
+        "daemon unavailable"
+    )
+    secret = "ghp_SUPERSECRET"
+
+    with pytest.raises(RuntimeError) as exc_info:
+        docker_toolkit._docker_exec(
+            f"pip install https://user:{secret}@example.com/private.git"
+        )
+
+    assert secret not in str(exc_info.value)
+    assert "daemon unavailable" in str(exc_info.value)
 
 
 def test_init():
@@ -365,3 +419,178 @@ def test_sanitize_command_respects_customized_dangerous_commands(
     )
     assert not is_safe
     assert "echo" in message.lower()
+
+
+@pytest.fixture
+def make_approval_toolkit(temp_dir, monkeypatch, request):
+    monkeypatch.setattr(
+        TerminalToolkit, "_setup_initial_environment", lambda self: None
+    )
+
+    def create(**kwargs):
+        toolkit = TerminalToolkit(working_directory=str(temp_dir), **kwargs)
+        request.addfinalizer(toolkit.cleanup)
+        return toolkit
+
+    return create
+
+
+@pytest.mark.parametrize("block", [True, False])
+@pytest.mark.parametrize("decision", [None, True, False, "error"])
+def test_shell_exec_approval(
+    make_approval_toolkit, monkeypatch, block, decision
+):
+    approval = None if decision is None else Mock(return_value=decision)
+    if decision == "error":
+        approval.side_effect = ValueError("policy failed")
+    toolkit = make_approval_toolkit(require_approval=approval)
+    popen = Mock(wraps=terminal_toolkit_module.subprocess.Popen)
+    monkeypatch.setattr(terminal_toolkit_module.subprocess, "Popen", popen)
+
+    if decision == "error":
+        with pytest.raises(ValueError, match="policy failed"):
+            toolkit.shell_exec("approval", "echo approved", block=block)
+    else:
+        result = toolkit.shell_exec("approval", "echo approved", block=block)
+        if decision is False:
+            assert "rejected" in result
+        elif block:
+            assert "approved" in result
+        else:
+            toolkit.shell_sessions["approval"]["process"].wait(timeout=5)
+
+    if approval is not None:
+        approval.assert_called_once_with("echo approved")
+    if decision is False or decision == "error":
+        popen.assert_not_called()
+        assert toolkit.shell_sessions == {}
+    else:
+        popen.assert_called_once()
+
+
+@pytest.mark.parametrize("is_safe", [True, False])
+def test_approval_runs_after_sanitization(
+    make_approval_toolkit, monkeypatch, is_safe
+):
+    approval = Mock(return_value=False)
+    toolkit = make_approval_toolkit(require_approval=approval)
+    monkeypatch.setattr(
+        toolkit, "_sanitize_command", Mock(return_value=(is_safe, "sanitized"))
+    )
+    toolkit.shell_exec("approval", "original")
+    if is_safe:
+        approval.assert_called_once_with("sanitized")
+    else:
+        approval.assert_not_called()
+
+
+@pytest.mark.parametrize("backend", ["local", "docker"])
+@pytest.mark.parametrize("decision", [None, True, False, "error"])
+def test_process_input_approval(
+    make_approval_toolkit, monkeypatch, backend, decision
+):
+    approval = None if decision is None else Mock(return_value=decision)
+    if decision == "error":
+        approval.side_effect = ValueError("policy failed")
+    toolkit = make_approval_toolkit(require_approval=approval)
+    process = Mock()
+    session = {
+        "running": True,
+        "backend": backend,
+        "process": process,
+        "command_history": [],
+        "log_file": "unused",
+    }
+    toolkit.shell_sessions["approval"] = session
+    monkeypatch.setattr(
+        toolkit, "_collect_output_until_idle", Mock(return_value="")
+    )
+    monkeypatch.setattr(toolkit, "_write_to_log", Mock())
+    try:
+        if decision == "error":
+            with pytest.raises(ValueError, match="policy failed"):
+                toolkit.shell_write_to_process("approval", "echo input")
+        else:
+            result = toolkit.shell_write_to_process("approval", "echo input")
+            if decision is False:
+                assert "rejected" in result
+
+        if approval is not None:
+            approval.assert_called_once_with("echo input")
+        if decision is False or decision == "error":
+            process.stdin.write.assert_not_called()
+            process.stdin.flush.assert_not_called()
+            process._sock.sendall.assert_not_called()
+            assert session["command_history"] == []
+            assert session["running"] is True
+        elif backend == "local":
+            process.stdin.write.assert_called_once_with("echo input\n")
+            process.stdin.flush.assert_called_once()
+        else:
+            process._sock.sendall.assert_called_once_with(b"echo input\n")
+    finally:
+        toolkit.shell_sessions.clear()
+
+
+@pytest.mark.skipif(platform.system() == "Windows", reason="Requires bash")
+def test_approved_shell_does_not_approve_later_input(
+    make_approval_toolkit, temp_dir
+):
+    approval = Mock(side_effect=lambda command: command == "bash")
+    toolkit = make_approval_toolkit(require_approval=approval)
+    toolkit.shell_exec("approval", "bash", block=False)
+    process = toolkit.shell_sessions["approval"]["process"]
+    command = "echo bypass > approval_probe.txt"
+    try:
+        result = toolkit.shell_write_to_process("approval", command)
+        assert "rejected" in result
+        assert not (temp_dir / "approval_probe.txt").exists()
+        assert [call.args[0] for call in approval.call_args_list] == [
+            "bash",
+            command,
+        ]
+    finally:
+        process.stdin.write("exit\n")
+        process.stdin.flush()
+        try:
+            process.wait(timeout=5)
+        except terminal_toolkit_module.subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+
+@pytest.mark.parametrize("stdin", [None, io.StringIO("yes\n")])
+def test_console_approval_denies_non_tty(monkeypatch, stdin):
+    monkeypatch.setattr(terminal_toolkit_module.sys, "stdin", stdin)
+    prompt = Mock(side_effect=AssertionError("Must not read non-TTY input"))
+    monkeypatch.setattr("builtins.input", prompt)
+    assert (
+        terminal_toolkit_module._default_console_approval("echo test") is False
+    )
+    prompt.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "response,expected",
+    [
+        ("yes", True),
+        (" Y ", True),
+        ("", False),
+        ("no", False),
+        (EOFError(), False),
+    ],
+)
+def test_console_approval_interactive(monkeypatch, response, expected):
+    monkeypatch.setattr(
+        terminal_toolkit_module.sys,
+        "stdin",
+        Mock(isatty=Mock(return_value=True)),
+    )
+    prompt = Mock(return_value=response)
+    if isinstance(response, Exception):
+        prompt.side_effect = response
+    monkeypatch.setattr("builtins.input", prompt)
+    assert (
+        terminal_toolkit_module._default_console_approval("echo test")
+        is expected
+    )

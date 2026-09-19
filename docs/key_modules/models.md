@@ -47,7 +47,7 @@ CAMEL supports a wide range of models, including [OpenAI’s GPT series](https:/
 | **Gemini**       | gemini-3.1-pro-preview, gemini-3.1-flash-lite-preview<br/>gemini-3-pro-preview, gemini-3-flash-preview<br/>gemini-2.5-pro, gemini-2.5-flash<br/>gemini-2.0-flash, gemini-2.0-flash-exp<br/>gemini-2.0-flash-thinking-exp, gemini-2.0-pro-exp-02-05<br/>gemini-2.0-flash-lite, gemini-2.0-flash-lite-preview-02-05 |
 | **Qwen**         | qwen3-coder-plus<br/>qwen-max, qwen-plus, qwen-turbo, qwen-long<br/>qwen-plus-latest, qwen-plus-2025-04-28, qwen-turbo-latest, qwen-turbo-2025-04-28<br/>qwen-vl-max, qwen-vl-plus, qwen2.5-vl-72b-instruct<br/>qwen-math-plus, qwen-math-turbo, qwen-coder-turbo<br/>qwen2.5-coder-32b-instruct, qwen2.5-72b-instruct, qwen2.5-32b-instruct, qwen2.5-14b-instruct<br/>qwq-32b-preview, qwq-plus, qvq-72b-preview |
 | **DeepSeek**     | deepseek-v4-flash, deepseek-v4-pro<br/>deepseek-chat, deepseek-reasoner |
-| **ZhipuAI**      | glm-5, glm-4.7, glm-4.7-flash, glm-4.7-flashx<br/>glm-4.6, glm-4.6v, glm-4.6v-flash, glm-4.6v-flashx<br/>glm-4.5v, glm-4.5-air, glm-4.5-airx, glm-4.5-flash<br/>glm-4, glm-4v, glm-4v-flash<br/>glm-4v-plus-0111, glm-4-plus, glm-4-air<br/>glm-4-air-0111, glm-4-airx, glm-4-long<br/>glm-4-flashx, glm-4-flashx-250414<br/>glm-4-flash, glm-4-flash-250414<br/>glm-4.1v-thinking-flash, glm-4.1v-thinking-flashx<br/>glm-zero-preview, glm-3-turbo |
+| **ZhipuAI**      | glm-5.2, glm-5.1, glm-5, glm-4.7, glm-4.7-flash, glm-4.7-flashx<br/>glm-4.6, glm-4.6v, glm-4.6v-flash, glm-4.6v-flashx<br/>glm-4.5v, glm-4.5-air, glm-4.5-airx, glm-4.5-flash<br/>glm-4, glm-4v, glm-4v-flash<br/>glm-4v-plus-0111, glm-4-plus, glm-4-air<br/>glm-4-air-0111, glm-4-airx, glm-4-long<br/>glm-4-flashx, glm-4-flashx-250414<br/>glm-4-flash, glm-4-flash-250414<br/>glm-4.1v-thinking-flash, glm-4.1v-thinking-flashx<br/>glm-zero-preview, glm-3-turbo |
 | **InternLM**     | internlm3-latest, internlm3-8b-instruct<br/>internlm2.5-latest, internlm2-pro-chat |
 | **Reka**         | reka-core, reka-flash, reka-edge |
 | **COHERE**       | command-r-plus, command-r, command-light, command, command-nightly |
@@ -65,7 +65,7 @@ CAMEL supports a wide range of models, including [OpenAI’s GPT series](https:/
 | **SambaNova**    | [supported models](https://docs.sambanova.ai/cloud/docs/get-started/supported-models) |
 | **Ollama**       | [supported models](https://ollama.com/library) |
 | **CometAPI**     | [supported models](https://api.cometapi.com/pricing) |
-| **Nebius**       | [supported models](https://studio.nebius.com/) |
+| **Nebius**       | [supported models](https://tokenfactory.nebius.com/model-catalog.md) |
 | **OpenRouter**   | [supported models](https://openrouter.ai/models) |
 | **OrcaRouter**   | [supported models](https://www.orcarouter.ai/models) |
 | **PPIO**         | [supported models](https://ppio.com/model-api/console) |
@@ -283,21 +283,21 @@ Integrate your favorite models into CAMEL-AI with straightforward Python calls. 
 
   <Tab title="Nebius">
 
-  Leverage [Nebius AI Studio](https://nebius.com/)'s high-performance GPU cloud with OpenAI-compatible models:
+  Use [Nebius Token Factory](https://tokenfactory.nebius.com/) with CAMEL's OpenAI-compatible model interface:
 
- - **Nebius AI Studio** ([Platform](https://studio.nebius.com/)): Access powerful models through their cloud infrastructure.
- - **API Key Setup** ([Generate Key](https://studio.nebius.ai/settings/api-keys)): Obtain your Nebius API key to start integration.
- - **Nebius Docs** ([Documentation](https://nebius.com/docs/)): Explore detailed Nebius API capabilities.
+ - **Token Factory** ([Platform](https://tokenfactory.nebius.com/)): Run models through the managed inference API.
+ - **API Key Setup** ([Generate Key](https://tokenfactory.nebius.com/)): Obtain a Token Factory API key.
+ - **Token Factory Docs** ([Documentation](https://docs.tokenfactory.nebius.com/)): Explore the API and supported capabilities.
 
   ```python
   from camel.models import ModelFactory
-  from camel.types import ModelPlatformType, ModelType
+  from camel.types import ModelPlatformType
   from camel.configs import NebiusConfig
   from camel.agents import ChatAgent
 
   model = ModelFactory.create(
       model_platform=ModelPlatformType.NEBIUS,
-      model_type=ModelType.NEBIUS_GPT_OSS_120B,
+      model_type="openai/gpt-oss-120b",
       model_config_dict=NebiusConfig(temperature=0.2).as_dict(),
   )
 
@@ -311,26 +311,26 @@ Integrate your favorite models into CAMEL-AI with straightforward Python calls. 
   ```
 
   <Note type="info">
-    **Flexible Model Access:** You can use any model available on Nebius by passing the model name as a string to `model_type`, even if it's not in the predefined enums.
+    **Flexible Model Access:** Pass a model ID from the live [Token Factory model catalog](https://tokenfactory.nebius.com/model-catalog.md) as a string to `model_type`. This avoids coupling an application to CAMEL's legacy convenience enums as the catalog changes.
   </Note>
 
   **Environment Variables:**
   ```bash
   export NEBIUS_API_KEY="your_nebius_api_key"
-  export NEBIUS_API_BASE_URL="https://api.studio.nebius.com/v1"  # Optional
+  export NEBIUS_API_BASE_URL="https://api.tokenfactory.nebius.com/v1"  # Optional
   ```
 
   **Model Support:**
-  - **Complete Access:** All models available on [Nebius AI Studio](https://studio.nebius.com/) are supported
-  - **Predefined Enums:** Common models like `NEBIUS_GPT_OSS_120B`, `NEBIUS_DEEPSEEK_V3`, etc.
-  - **String-based Access:** Use any model name directly as a string for maximum flexibility
+  - **Catalog-backed selection:** Choose an active model ID from the [public catalog](https://tokenfactory.nebius.com/model-catalog.md)
+  - **String-based access:** Use the catalog model ID directly so newly available models do not require a CAMEL release
+  - **Compatibility:** Existing `NEBIUS_*` enum values remain available, but their upstream model lifecycle may differ
 
   **Example with any model:**
   ```python
-  # Use any model available on Nebius
+  # Use any active model ID from the Token Factory model catalog
   model = ModelFactory.create(
       model_platform=ModelPlatformType.NEBIUS,
-      model_type="your-custom-model-name"  # Any Nebius model
+      model_type="openai/gpt-oss-120b"
   )
   ```
 
